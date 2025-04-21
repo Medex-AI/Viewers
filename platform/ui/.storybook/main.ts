@@ -1,6 +1,16 @@
 import path, { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
 import remarkGfm from 'remark-gfm';
 import type { StorybookConfig } from '@storybook/react-webpack5';
+
+const require = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function getAbsolutePath(value: string): any {
+  return dirname(require.resolve(join(value, 'package.json')));
+}
 
 const config: StorybookConfig = {
   stories: ['../src/**/*.stories.@(mdx)'],
@@ -99,7 +109,3 @@ const config: StorybookConfig = {
 };
 
 export default config;
-
-function getAbsolutePath(value: string): any {
-  return dirname(require.resolve(join(value, 'package.json')));
-}

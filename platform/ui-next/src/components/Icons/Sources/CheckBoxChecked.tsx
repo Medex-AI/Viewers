@@ -20,8 +20,10 @@ export const CheckBoxChecked = (props: IconProps) => (
       fillRule="evenodd"
     >
       <rect
-        stroke="#348CFD"
-        fill="#348CFD"
+        // stroke="#348CFD"
+        stroke="#F47620"
+        // fill="#348CFD"
+        fill="#F47620"
         x=".5"
         y=".5"
         width="11"

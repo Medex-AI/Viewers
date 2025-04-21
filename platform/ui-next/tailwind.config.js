@@ -107,7 +107,8 @@ module.exports = {
         secondary: '#7BB2CE',
       },
       actions: {
-        primary: '#348CFD',
+        // primary: '#348CFD',
+        primary: '#F47620',
         highlight: '#5ACCE6',
         hover: 'rgba(52, 140, 253, 0.2)',
       },

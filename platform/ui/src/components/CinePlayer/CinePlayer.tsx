@@ -87,7 +87,8 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
           leftColor="#3a3f99"
           rightColor="#3a3f99"
           trackHeight="4px"
-          thumbColor="#348cfd"
+          // thumbColor="#348cfd"
+          thumbColor="#F47620"
           thumbColorOuter="#000000"
           showLabel={false}
         />
