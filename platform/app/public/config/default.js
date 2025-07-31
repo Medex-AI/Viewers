@@ -268,9 +268,9 @@ window.config = {
       configuration: {
         friendlyName: 'Medex Orthanc DICOMWeb Server',
         name: 'ORTHANC-MEDEX',
-        wadoUriRoot: 'http://178.128.158.248/dicom-web',
-        qidoRoot: 'http://178.128.158.248/dicom-web',
-        wadoRoot: 'http://178.128.158.248/dicom-web',
+        wadoUriRoot: '/dicom-web',
+        qidoRoot: '/dicom-web',
+        wadoRoot: '/dicom-web',
         qidoSupportsIncludeField: true,
         supportsReject: true,
         dicomUploadEnabled: true,

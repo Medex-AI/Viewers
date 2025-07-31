@@ -2,7 +2,9 @@ const debugMode = !!(process.env.NODE_ENV !== 'production' && process.env.REACT_
 
 const detectionOptions = {
   // order and from where user language should be detected
-  order: ['querystring', 'cookie', 'localStorage', 'navigator', 'htmlTag', 'path', 'subdomain'],
+  // Removed 'navigator' to disable system language detection
+  // Removed 'htmlTag' to avoid HTML lang attribute detection
+  order: ['querystring', 'cookie', 'localStorage'],
 
   // keys or params to lookup language from
   lookupQuerystring: 'lng',

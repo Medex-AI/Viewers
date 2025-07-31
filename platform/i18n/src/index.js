@@ -77,6 +77,7 @@ function initI18n(
       // init i18next
       // for all options read: https://www.i18next.com/overview/configuration-options
       .init({
+        lng: DEFAULT_LANGUAGE, // Force default language to English
         fallbackLng: DEFAULT_LANGUAGE,
         saveMissing: apiKeyAvailable,
         debug: debugMode,
@@ -113,6 +114,7 @@ function initI18n(
       // init i18next
       // for all options read: https://www.i18next.com/overview/configuration-options
       .init({
+        lng: DEFAULT_LANGUAGE, // Force default language to English
         fallbackLng: DEFAULT_LANGUAGE,
         resources: locales,
         debug: debugMode,
