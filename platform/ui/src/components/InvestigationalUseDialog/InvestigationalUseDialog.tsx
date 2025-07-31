@@ -71,14 +71,6 @@ const InvestigationalUseDialog = ({
               Medex Viewer is{' '}
               <span className="text-primary-light">for investigational use only</span>
             </div>
-            <div className="text-[13px] text-white">
-              <span
-                className="text-primary-active cursor-pointer"
-                onClick={() => window.open('https://ohif.org/', '_blank')}
-              >
-                Learn more about Medex Viewer
-              </span>
-            </div>
           </div>
         </div>
         <Button

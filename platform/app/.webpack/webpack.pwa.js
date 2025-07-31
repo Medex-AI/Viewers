@@ -162,6 +162,23 @@ module.exports = (env, argv) => {
       },
       proxy: {
         '/dicomweb': 'http://localhost:5000',
+        '/dicom-web': {
+          target: 'http://localhost:8042',
+          changeOrigin: true,
+          secure: false,
+          logLevel: 'debug',
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          },
+          onProxyReq: (proxyReq, req, res) => {
+            console.log('Proxying request:', req.method, req.url, '-> http://localhost:8042' + req.url);
+          },
+          onError: (err, req, res) => {
+            console.error('Proxy error:', err);
+          },
+        },
         '/dicom-microscopy-viewer': {
           target: 'http://localhost:3000',
           pathRewrite: {
@@ -195,13 +212,11 @@ module.exports = (env, argv) => {
 
   if (hasProxy) {
     mergedConfig.devServer.proxy = mergedConfig.devServer.proxy || {};
-    mergedConfig.devServer.proxy = {
-      [PROXY_TARGET]: {
-        target: PROXY_DOMAIN,
-        changeOrigin: true,
-        pathRewrite: {
-          [`^${PROXY_PATH_REWRITE_FROM}`]: PROXY_PATH_REWRITE_TO,
-        },
+    mergedConfig.devServer.proxy[PROXY_TARGET] = {
+      target: PROXY_DOMAIN,
+      changeOrigin: true,
+      pathRewrite: {
+        [`^${PROXY_PATH_REWRITE_FROM}`]: PROXY_PATH_REWRITE_TO,
       },
     };
   }
