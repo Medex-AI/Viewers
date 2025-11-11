@@ -26,22 +26,27 @@ window.config = {
     prefetch: 25,
   },
   whiteLabeling: {
-    // createLogoComponentFn: function(React) {
-    //   return React.createElement(
-    //     'a',
-    //     {
-    //       target: '_self',
-    //       rel: 'noopener noreferrer',
-    //       className: 'text-white',
-    //       href: '/',
-    //     },
-    //     React.createElement('img', {
-    //       src: './path-to-your-logo.png',
-    //       alt: 'Medex AI',
-    //       style: { height: '40px' }, // Adjust styling as needed
-    //     })
-    //   );
-    // },
+    createLogoComponentFn: function (React) {
+      return React.createElement(
+        'a',
+        {
+          target: '_self',
+          rel: 'noopener noreferrer',
+          href: '/',
+          className: 'flex items-center',
+        },
+        // Dark Theme Logo
+        React.createElement('img', {
+          src: './assets/images/medex-logo.svg',
+          className: 'h-8 w-auto dark-theme-logo',
+          alt: 'Ovi Lab',
+        }),
+        // Ovi Lab Viewer Text
+        React.createElement('span', {
+          className: 'ml-2 text-xl font-semibold text-orange-500',
+        }, 'Ovi Lab Viewer')
+      );
+    },
   },
   // filterQueryParam: false,
   // Defines multi-monitor layouts
@@ -105,7 +110,7 @@ window.config = {
       ],
     },
   ],
-  defaultDataSourceName: 'orthanc-medex',
+  defaultDataSourceName: 'orthanc-ovilab',
   // defaultDataSourceName: 'ohif3',
   /* Dynamic config allows user to pass "configUrl" query string this allows to load config without recompiling application. The regex will ensure valid configuration source */
   // dangerouslyUseDynamicConfig: {
@@ -264,10 +269,10 @@ window.config = {
     },
     {
       namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
-      sourceName: 'orthanc-medex',
+      sourceName: 'orthanc-ovilab',
       configuration: {
-        friendlyName: 'Medex Orthanc DICOMWeb Server',
-        name: 'ORTHANC-MEDEX',
+        friendlyName: 'Ovi Lab Orthanc DICOMWeb Server',
+        name: 'ORTHANC-OVILAB',
         wadoUriRoot: '/dicom-web',
         qidoRoot: '/dicom-web',
         wadoRoot: '/dicom-web',

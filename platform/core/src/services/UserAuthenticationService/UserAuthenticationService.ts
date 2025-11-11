@@ -1,7 +1,19 @@
 import { PubSubService } from '../_shared/pubSubServiceInterface';
 
+// Import authService - we'll need to handle the import path properly
+// This will be resolved when the app initializes and sets the implementation
+let authService: any = null;
+
+// Helper function to set the auth service reference
+export const setAuthServiceReference = (service: any) => {
+  authService = service;
+};
+
 class UserAuthenticationService extends PubSubService {
-  public static readonly EVENTS = {};
+  public static readonly EVENTS = {
+    USER_AUTHENTICATED: 'event::userAuthenticated',
+    USER_UNAUTHENTICATED: 'event::userUnauthenticated',
+  };
 
   public static REGISTRATION = {
     name: 'userAuthenticationService',
@@ -11,14 +23,65 @@ class UserAuthenticationService extends PubSubService {
     },
   };
 
+  private currentUser: any = null;
+  private authState: any = null;
+
   serviceImplementation = {
-    _getState: () => console.warn('getState() NOT IMPLEMENTED'),
-    _setUser: () => console.warn('_setUser() NOT IMPLEMENTED'),
-    _getUser: () => console.warn('_getUser() NOT IMPLEMENTED'),
-    _getAuthorizationHeader: () => {}, // TODO: Implement this method
-    _handleUnauthenticated: () => console.warn('_handleUnauthenticated() NOT IMPLEMENTED'),
-    _reset: () => console.warn('reset() NOT IMPLEMENTED'),
-    _set: () => console.warn('set() NOT IMPLEMENTED'),
+    _getState: () => {
+      const user = authService?.getCurrentUser() || this.currentUser;
+      const isAuthenticated = authService?.isAuthenticated() || false;
+      
+      console.log('UserAuthenticationService _getState - user:', user, 'authenticated:', isAuthenticated);
+      
+      return {
+        isAuthenticated,
+        user,
+        token: authService?.getToken() || null,
+        enabled: true, // Always enable authentication
+      };
+    },
+    _setUser: (user: any) => {
+      console.log('UserAuthenticationService _setUser called with:', user);
+      this.currentUser = user;
+      this.authState = { ...this.authState, user };
+      this._broadcastEvent(UserAuthenticationService.EVENTS.USER_AUTHENTICATED, { user });
+    },
+    _getUser: () => {
+      const user = authService?.getCurrentUser() || this.currentUser;
+      console.log('UserAuthenticationService _getUser returning:', user);
+      return user;
+    },
+    _getAuthorizationHeader: () => {
+      const token = authService?.getToken();
+      return token ? `Bearer ${token}` : null;
+    },
+    _handleUnauthenticated: () => {
+      if (authService) {
+        authService.clearToken();
+      }
+      this.currentUser = null;
+      this.authState = null;
+      this._broadcastEvent(UserAuthenticationService.EVENTS.USER_UNAUTHENTICATED, {});
+      
+      // Redirect to login page
+      const currentPath = window.location.pathname + window.location.search;
+      const loginUrl = `/login?redirect=${encodeURIComponent(currentPath)}`;
+      window.location.href = loginUrl;
+    },
+    _reset: () => {
+      if (authService) {
+        authService.clearToken();
+      }
+      this.currentUser = null;
+      this.authState = null;
+      this._broadcastEvent(UserAuthenticationService.EVENTS.USER_UNAUTHENTICATED, {});
+    },
+    _set: (state: any) => {
+      this.authState = { ...this.authState, ...state };
+      if (state.user) {
+        this.currentUser = state.user;
+      }
+    },
   };
 
   constructor() {

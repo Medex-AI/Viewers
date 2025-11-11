@@ -68,7 +68,7 @@ const InvestigationalUseDialog = ({
           <Icons.InvestigationalUse className="h-18 w-18" />
           <div className="flex flex-col">
             <div className="text-[19px] text-white">
-              Medex Viewer is{' '}
+              Ovi Lab Viewer is{' '}
               <span className="text-primary-light">for investigational use only</span>
             </div>
           </div>

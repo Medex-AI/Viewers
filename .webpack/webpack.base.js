@@ -223,12 +223,14 @@ module.exports = (env, argv, { SRC_DIR, ENTRY }) => {
         path: false,
         zlib: false,
         buffer: require.resolve('buffer'),
+        process: require.resolve('process/browser'),
       },
     },
     plugins: [
       new webpack.DefinePlugin(defineValues),
       new webpack.ProvidePlugin({
         Buffer: ['buffer', 'Buffer'],
+        process: 'process/browser',
       }),
       ...(isProdBuild ? [] : [new ReactRefreshWebpackPlugin({ overlay: false })]),
       // Uncomment to generate bundle analyzer

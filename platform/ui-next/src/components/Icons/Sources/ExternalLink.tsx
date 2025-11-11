@@ -3,6 +3,8 @@ import type { IconProps } from '../types';
 
 export const ExternalLink = (props: IconProps) => (
   <svg
+    width="24px"
+    height="24px"
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 24 24"
     fill="none"

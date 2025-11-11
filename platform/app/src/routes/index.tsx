@@ -10,6 +10,8 @@ import Debug from './Debug';
 import NotFound from './NotFound';
 import buildModeRoutes from './buildModeRoutes';
 import PrivateRoute from './PrivateRoute';
+import LoginPage from '../components/LoginPage';
+import authService from '../services/authService';
 import PropTypes from 'prop-types';
 import { routerBase, routerBasename } from '../utils/publicUrl';
 
@@ -54,6 +56,11 @@ NotFoundStudy.propTypes = {
 
 // TODO: Include "routes" debug route if dev build
 const bakedInRoutes = [
+  {
+    path: `/login`,
+    children: LoginPage,
+    private: false, // Public route - no authentication required
+  },
   {
     path: `/notfoundserver`,
     children: NotFoundServer,
@@ -108,9 +115,17 @@ const createRoutes = ({
   console.log('Registering worklist route', routerBasename, path);
 
   const WorkListRoute = {
-    path: '/',
+    path: '/app',
     children: DataSourceWrapper,
     private: true,
+    props: { children: WorkList, servicesManager, extensionManager },
+  };
+
+  // Add root route to serve WorkList directly at '/' (temporary - bypassing auth)
+  const RootWorkListRoute = {
+    path: '/',
+    children: DataSourceWrapper,
+    private: false, // Temporarily make this public to bypass authentication
     props: { children: WorkList, servicesManager, extensionManager },
   };
 
@@ -118,7 +133,7 @@ const createRoutes = ({
 
   const allRoutes = [
     ...routes,
-    ...(showStudyList ? [WorkListRoute] : []),
+    ...(showStudyList ? [WorkListRoute, RootWorkListRoute] : [RootWorkListRoute]),
     ...(customRoutes?.routes || []),
     ...bakedInRoutes,
     customRoutes?.notFoundRoute || notFoundRoute,
@@ -148,7 +163,10 @@ const createRoutes = ({
   return (
     <Routes>
       {allRoutes.map((route, i) => {
-        return route.private === true ? (
+        // Routes are private by default unless explicitly marked as public
+        const isPublicRoute = route.private === false;
+        
+        return !isPublicRoute ? (
           <Route
             key={i}
             path={route.path}

@@ -2,18 +2,29 @@ import React from 'react';
 import { ToggleGroup, ToggleGroupItem } from '@ohif/ui-next';
 import { Icons } from '@ohif/ui-next';
 import { actionIcon, viewPreset } from './types';
+import MoreDropdownMenu from '../../Components/MoreDropdownMenu';
 
 function PanelStudyBrowserHeader({
   viewPresets,
   updateViewPresetValue,
   actionIcons,
   updateActionIconValue,
+  commandsManager,
+  servicesManager,
 }: {
   viewPresets: viewPreset[];
   updateViewPresetValue: (viewPreset: viewPreset) => void;
   actionIcons: actionIcon[];
   updateActionIconValue: (actionIcon: actionIcon) => void;
+  commandsManager: AppTypes.CommandsManager;
+  servicesManager: AppTypes.ServicesManager;
 }) {
+  const HeaderMenu = MoreDropdownMenu({
+    commandsManager,
+    servicesManager,
+    menuItemsKey: 'studyBrowser.headerMenu',
+  });
+
   return (
     <>
       <div className="bg-muted flex h-[40px] select-none rounded-t p-2">
@@ -30,7 +41,8 @@ function PanelStudyBrowserHeader({
                 )}
               </div>
             </div>
-            <div className="ml-auto flex h-full items-center justify-center">
+            <div className="ml-auto flex h-full items-center justify-center gap-2">
+              {HeaderMenu ? <HeaderMenu /> : null}
               <ToggleGroup
                 type="single"
                 value={viewPresets.filter(preset => preset.selected)[0].id}

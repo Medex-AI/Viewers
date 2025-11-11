@@ -25,6 +25,7 @@ import {
 } from '@ohif/core';
 
 import loadModules, { loadModule as peerImport } from './pluginImports';
+import initializeAuthServiceIntegration from './services/authServiceIntegration';
 
 /**
  * @param {object|func} appConfigOrFunc - application configuration, or a function that returns application configuration
@@ -77,6 +78,9 @@ async function appInit(appConfigOrFunc, defaultExtensions, defaultModes) {
     WorkflowStepsService.REGISTRATION,
     [StudyPrefetcherService.REGISTRATION, appConfig.studyPrefetcher],
   ]);
+
+  // Initialize auth service integration after services are registered
+  initializeAuthServiceIntegration(servicesManager);
 
   errorHandler.getHTTPErrorHandler = () => {
     if (typeof appConfig.httpErrorHandler === 'function') {

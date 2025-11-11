@@ -208,7 +208,7 @@ function WorkList({
     {
       title: t('Header:About'),
       icon: 'info',
-      onClick: () => show({ content: AboutModal, title: 'About Medex Viewer' }),
+      onClick: () => show({ content: AboutModal, title: 'About Ovi Lab Viewer' }),
     },
     {
       title: t('Header:Preferences'),

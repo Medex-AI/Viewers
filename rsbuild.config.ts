@@ -145,8 +145,9 @@ export default defineConfig({
     open: true,
     // Configure proxy
     proxy: {
-      '/dicomweb': {
-        target: 'http://localhost:5000',
+      '/dicom-web': {
+        target: process.env.REACT_APP_ORTHANC_URL || 'http://localhost:8042',
+        changeOrigin: true,
       },
       // Add conditional proxy based on env vars
       ...(PROXY_TARGET && PROXY_DOMAIN

@@ -35,6 +35,9 @@ import appInit from './appInit.js';
 import OpenIdConnectRoutes from './utils/OpenIdConnectRoutes';
 import { ShepherdJourneyProvider } from 'react-shepherd';
 
+// CRITICAL FIX: Import the auth service integration
+import { initializeAuthServiceIntegration } from './services/authServiceIntegration';
+
 let commandsManager: CommandsManager,
   extensionManager: ExtensionManager,
   servicesManager: AppTypes.ServicesManager,
@@ -81,6 +84,10 @@ function App({
   servicesManager = init.servicesManager;
   serviceProvidersManager = init.serviceProvidersManager;
   hotkeysManager = init.hotkeysManager;
+
+  // CRITICAL FIX: Initialize auth service integration after services are available
+  // This ensures the authService reference is set in UserAuthenticationService
+  initializeAuthServiceIntegration(servicesManager);
 
   // Set appConfig
   const appConfigState = init.appConfig;

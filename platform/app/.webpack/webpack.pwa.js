@@ -161,9 +161,9 @@ module.exports = (env, argv) => {
         overlay: { errors: true, warnings: false },
       },
       proxy: {
-        '/dicomweb': 'http://localhost:5000',
+        '/dicomweb': process.env.AUTH_PROXY_TARGET || 'http://localhost:5000',
         '/dicom-web': {
-          target: 'http://localhost:8042',
+          target: process.env.DICOMWEB_PROXY_TARGET || 'http://localhost:8042',
           changeOrigin: true,
           secure: false,
           logLevel: 'debug',
@@ -173,7 +173,8 @@ module.exports = (env, argv) => {
             'Access-Control-Allow-Headers': 'Content-Type, Authorization',
           },
           onProxyReq: (proxyReq, req, res) => {
-            console.log('Proxying request:', req.method, req.url, '-> http://localhost:8042' + req.url);
+            const target = process.env.DICOMWEB_PROXY_TARGET || 'http://localhost:8042';
+            console.log('Proxying request:', req.method, req.url, '->', target + req.url);
           },
           onError: (err, req, res) => {
             console.error('Proxy error:', err);
