@@ -63,8 +63,8 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin, redirectTo }) => {
   return (
     <div className={styles.container}>
       <div className={styles.loginBox}>
-        <img src={LOGO_URL} alt="Ovi Lab Logo" className={styles.logo} />
-        <h1 className={styles.title}>Welcome to Ovi Lab</h1>
+        <img src={LOGO_URL} alt="MedEx Logo" className={styles.logo} />
+        <h1 className={styles.title}>Welcome to MedEx</h1>
         <p className={styles.subtitle}>Sign in to access your account</p>
         <form onSubmit={handleSubmit} className={styles.form}>
           <input

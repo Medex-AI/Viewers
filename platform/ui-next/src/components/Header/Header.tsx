@@ -1,5 +1,6 @@
 import React, { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import classNames from 'classnames';
 import {
   DropdownMenu,
@@ -44,9 +45,26 @@ function Header({
   Secondary,
   ...props
 }: HeaderProps): ReactNode {
+  const navigate = useNavigate();
+
   const onClickReturn = () => {
     if (isReturnEnabled && onClickReturnButton) {
       onClickReturnButton();
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      // Dynamic import to avoid build errors if authService is not available
+      const { authService } = await import('../../../../app/src/services/authService');
+      await authService.logout();
+      navigate('/login');
+    } catch (error) {
+      console.error('Logout failed:', error);
+      // Clear local storage as fallback
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
+      navigate('/login');
     }
   };
 
@@ -81,12 +99,24 @@ function Header({
           {PatientInfo}
           <div className="border-primary-dark mx-1.5 h-[25px] border-r"></div>
           <div className="flex-shrink-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              className="text-primary hover:bg-primary-dark mt-2 h-full w-full"
+              title="Logout"
+            >
+              <Icons.Logout />
+            </Button>
+          </div>
+          <div className="flex-shrink-0">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="text-primary hover:bg-primary-dark mt-2 h-full w-full"
+                  title="Settings"
                 >
                   <Icons.GearSettings />
                 </Button>

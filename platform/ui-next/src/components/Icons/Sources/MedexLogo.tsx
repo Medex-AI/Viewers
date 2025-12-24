@@ -1,6 +1,6 @@
 import React from 'react';
 
-const OviLabLogo = () => (
+const MedexLogo = () => (
   <a
     target="_self"
     rel="noopener noreferrer"
@@ -9,11 +9,11 @@ const OviLabLogo = () => (
   >
     <img
       src="./assets/images/medex-logo.svg"
-      className="h-8 w-auto dark-theme-logo"
-      alt="Ovi Lab"
+      className="h-12 w-12 dark-theme-logo"
+      alt="MedEx"
     />
-    <span className="ml-2 text-xl font-semibold text-orange-500">Ovi Lab Viewer</span>
+    <span className="ml-2 text-xl font-semibold text-orange-500">MedEx Viewer</span>
   </a>
 );
 
-export default OviLabLogo;
+export default MedexLogo;

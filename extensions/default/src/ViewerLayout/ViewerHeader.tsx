@@ -48,7 +48,7 @@ function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }
       onClick: () =>
         show({
           content: AboutModal,
-          title: t('AboutModal:About Ovi Lab Viewer'),
+          title: t('AboutModal:About MedEx Viewer'),
           containerClassName: 'max-w-md',
         }),
     },

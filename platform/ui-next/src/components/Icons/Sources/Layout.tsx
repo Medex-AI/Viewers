@@ -13,7 +13,7 @@ export const LayoutAdvanced3DFourUp = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -66,7 +66,7 @@ export const LayoutAdvanced3DMain = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -114,7 +114,7 @@ export const LayoutAdvanced3DOnly = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -149,7 +149,7 @@ export const LayoutAdvanced3DPrimary = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -197,7 +197,7 @@ export const LayoutAdvancedAxialPrimary = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -236,7 +236,7 @@ export const LayoutAdvancedMPR = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -278,7 +278,7 @@ export const LayoutCommon1x1 = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -312,7 +312,7 @@ export const LayoutCommon1x2 = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -351,7 +351,7 @@ export const LayoutCommon2x2 = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >
@@ -395,7 +395,7 @@ export const LayoutCommon2x3 = (props: IconProps) => (
     <g
       id="Layout-select----FINAL"
       stroke="none"
-      strokeWidth="1"
+      strokeWidth="1.2"
       fill="none"
       fillRule="evenodd"
     >

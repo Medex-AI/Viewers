@@ -476,7 +476,7 @@ function WorkList({
       onClick: () =>
         show({
           content: AboutModal as React.ComponentType,
-          title: t('AboutModal:About Ovi Lab Viewer'),
+          title: t('AboutModal:About MedEx Viewer'),
           containerClassName: 'max-w-md ',
         }),
     },

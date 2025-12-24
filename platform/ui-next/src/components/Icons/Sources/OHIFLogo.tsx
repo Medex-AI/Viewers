@@ -15,7 +15,7 @@ export const OHIFLogo = (props: IconProps) => (
     }}
     {...props}
   >
-    Ovi Lab Image Viewer
+    MedEx Image Viewer
   </div>
 );
 

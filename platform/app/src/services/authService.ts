@@ -26,26 +26,62 @@ class AuthServiceImpl implements AuthService {
   private baseUrl: string;
   private currentUser: User | null = null;
   private token: string | null = null;
+  private sessionCheckInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     // Handle environment variable safely for browser environment
     this.baseUrl = (typeof process !== 'undefined' && process.env?.REACT_APP_AUTH_API_URL) || 'http://localhost:5000/api/auth';
     // Initialize from localStorage on startup
     this.initializeFromStorage();
+    // Start monitoring session expiration
+    this.startSessionMonitoring();
   }
 
   private initializeFromStorage(): void {
     const storedToken = localStorage.getItem('auth_token');
     const storedUser = localStorage.getItem('auth_user');
-    
+
     if (storedToken && storedUser) {
       try {
         this.token = storedToken;
         this.currentUser = JSON.parse(storedUser);
+        // Check if token is already expired on initialization
+        if (this.isTokenExpired(storedToken)) {
+          console.log('Stored token is expired, clearing session');
+          this.clearToken();
+        }
       } catch (error) {
         console.error('Failed to parse stored user data:', error);
         this.clearToken();
       }
+    }
+  }
+
+  private startSessionMonitoring(): void {
+    // Check session every 60 seconds
+    this.sessionCheckInterval = setInterval(() => {
+      if (this.token && this.isTokenExpired(this.token)) {
+        console.log('Session expired, logging out automatically');
+        this.handleSessionExpired();
+      }
+    }, 60000); // Check every 60 seconds
+  }
+
+  private stopSessionMonitoring(): void {
+    if (this.sessionCheckInterval) {
+      clearInterval(this.sessionCheckInterval);
+      this.sessionCheckInterval = null;
+    }
+  }
+
+  private handleSessionExpired(): void {
+    // Clear the session
+    this.clearToken();
+
+    // Redirect to login page
+    if (typeof window !== 'undefined') {
+      console.log('Session expired, redirecting to login page');
+      window.location.href = '/login?session_expired=true';
     }
   }
 
@@ -174,6 +210,7 @@ class AuthServiceImpl implements AuthService {
     this.currentUser = null;
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
+    this.stopSessionMonitoring();
   }
 
   // Utility method to check if token is expired (basic JWT parsing)

@@ -38,7 +38,7 @@ import Patient from './Sources/Patient';
 import Pin from './Sources/Pin';
 import PinFill from './Sources/PinFill';
 import Plus from './Sources/Plus';
-import PowerOff from './Sources/PowerOff';
+import Logout from './Sources/Logout';
 import Redo from './Sources/Redo';
 import Refresh from './Sources/Refresh';
 import Rename from './Sources/Rename';
@@ -468,7 +468,7 @@ export const Icons = {
   Pin,
   PinFill,
   Plus,
-  PowerOff,
+  Logout,
   Refresh,
   Rename,
   Series,
@@ -628,7 +628,8 @@ export const Icons = {
   'tab-patient-info': (props: IconProps) => TabPatientInfo(props),
   'tab-roi-threshold': (props: IconProps) => TabRoiThreshold(props),
   'icon-mpr': (props: IconProps) => IconMPR(props),
-  'power-off': (props: IconProps) => PowerOff(props),
+  'power-off': (props: IconProps) => Logout(props),
+  logout: (props: IconProps) => Logout(props),
   'icon-multiple-patients': (props: IconProps) => MultiplePatients(props),
   'icon-patient': (props: IconProps) => Patient(props),
   'chevron-down': (props: IconProps) => ChevronOpen(props),

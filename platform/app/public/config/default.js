@@ -39,12 +39,12 @@ window.config = {
         React.createElement('img', {
           src: './assets/images/medex-logo.svg',
           className: 'h-8 w-auto dark-theme-logo',
-          alt: 'Ovi Lab',
+          alt: 'MedEx',
         }),
-        // Ovi Lab Viewer Text
+        // MedEx Viewer Text
         React.createElement('span', {
           className: 'ml-2 text-xl font-semibold text-orange-500',
-        }, 'Ovi Lab Viewer')
+        }, 'MedEx Viewer')
       );
     },
   },
@@ -271,7 +271,7 @@ window.config = {
       namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
       sourceName: 'orthanc-ovilab',
       configuration: {
-        friendlyName: 'Ovi Lab Orthanc DICOMWeb Server',
+        friendlyName: 'MedEx Orthanc DICOMWeb Server',
         name: 'ORTHANC-OVILAB',
         wadoUriRoot: '/dicom-web',
         qidoRoot: '/dicom-web',
