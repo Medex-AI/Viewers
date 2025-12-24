@@ -1,11 +1,9 @@
 import { utils } from '@ohif/core';
+import { isSuitableForOviLabs } from '@ohif/mode-ovi-labs';
 const { formatDate } = utils;
 
 const MOTION_ANALYSIS_URL =
   process.env.REACT_APP_MOTION_ANALYSIS_URL || 'http://localhost:8501';
-
-const UTERUS_ANALYSIS_URL =
-  process.env.REACT_APP_UTERUS_ANALYSIS_URL || 'http://localhost:8502';
 
 export default {
   'studyBrowser.headerMenu': [
@@ -67,6 +65,11 @@ export default {
       id: 'uterusAnalysis',
       label: 'Uterus Analysis',
       iconName: 'ExternalLink',
+      isVisible: ({ displaySetInstanceUID, servicesManager }: withAppTypes) => {
+        const { displaySetService } = servicesManager.services;
+        const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
+        return isSuitableForOviLabs(displaySet);
+      },
       onClick: ({ servicesManager, displaySetInstanceUID }: withAppTypes) => {
         const { displaySetService, uiNotificationService } = servicesManager.services;
 
@@ -94,12 +97,12 @@ export default {
           return;
         }
 
-        const targetUrl = `${UTERUS_ANALYSIS_URL}?study=${encodeURIComponent(
+        const targetUrl = `/ovi-labs?StudyInstanceUIDs=${encodeURIComponent(
           studyInstanceUID
-        )}&series=${encodeURIComponent(seriesInstanceUID)}`;
+        )}&SeriesInstanceUID=${encodeURIComponent(seriesInstanceUID)}`;
 
         if (typeof window !== 'undefined') {
-          window.open(targetUrl, '_blank', 'noopener,noreferrer');
+          window.location.href = targetUrl;
         }
       },
     },

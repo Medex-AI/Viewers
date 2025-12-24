@@ -1,0 +1,43 @@
+{
+  "name": "@ohif/extension-ovi-labs",
+  "version": "3.11.0-beta.11",
+  "description": "OHIF extension for uterus motion analysis panel modules",
+  "author": "MedEx",
+  "license": "MIT",
+  "repository": "Medex-AI/Viewers",
+  "main": "dist/ohif-extension-ovi-labs.umd.js",
+  "module": "src/index.tsx",
+  "engines": {
+    "node": ">=14",
+    "npm": ">=6",
+    "yarn": ">=1.16.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "shx rm -rf dist",
+    "clean:deep": "yarn run clean && shx rm -rf node_modules",
+    "dev": "cross-env NODE_ENV=development webpack --config .webpack/webpack.dev.js --watch --output-pathinfo",
+    "build": "cross-env NODE_ENV=production webpack --config .webpack/webpack.prod.js",
+    "build:package": "yarn run build",
+    "start": "yarn run dev",
+    "test:unit": "jest --watchAll",
+    "test:unit:ci": "jest --ci --runInBand --collectCoverage --passWithNoTests"
+  },
+  "peerDependencies": {
+    "@ohif/core": "3.11.0-beta.11",
+    "@ohif/ui": "3.11.0-beta.11",
+    "prop-types": "^15.6.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.20.13",
+    "classnames": "^2.3.2"
+  }
+}

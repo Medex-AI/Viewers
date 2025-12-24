@@ -61,6 +61,9 @@
       "packageName": "@ohif/extension-cornerstone-dicom-rt",
       "default": false,
       "version": "3.0.0"
+    },
+    {
+      "packageName": "@ohif/extension-ovi-labs"
     }
   ],
   "modes": [
@@ -71,13 +74,19 @@
       "packageName": "@ohif/mode-segmentation"
     },
     {
-      "packageName": "@ohif/mode-tmtv"
+      "packageName": "@ohif/mode-ovi-labs"
     },
     {
-      "packageName": "@ohif/mode-microscopy"
+      "packageName": "@ohif/mode-tmtv",
+      "default": false
     },
     {
-      "packageName": "@ohif/mode-preclinical-4d"
+      "packageName": "@ohif/mode-microscopy",
+      "default": false
+    },
+    {
+      "packageName": "@ohif/mode-preclinical-4d",
+      "default": false
     },
     {
       "packageName": "@ohif/mode-test",
