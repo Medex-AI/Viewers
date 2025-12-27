@@ -1,10 +1,5 @@
 import React from 'react';
-import {
-  RoiViewerPanel,
-  FftAnalysisPanel,
-  KymographsPanel,
-  AnalysisPlotsPanel,
-} from './panels';
+import { AnalysisContainerPanel } from './panels';
 
 export default function getPanelModule({
   commandsManager,
@@ -19,32 +14,11 @@ export default function getPanelModule({
 
   return [
     {
-      name: 'roiViewer',
-      iconName: 'tab-roi-threshold',
-      iconLabel: 'ROI',
-      label: 'ROI Viewer',
-      component: () => <RoiViewerPanel {...childProps} />,
-    },
-    {
-      name: 'fftAnalysis',
+      name: 'analysisContainer',
       iconName: 'tab-linear',
-      iconLabel: 'FFT',
-      label: 'FFT Analysis',
-      component: () => <FftAnalysisPanel {...childProps} />,
-    },
-    {
-      name: 'kymographs',
-      iconName: 'tab-patient-info',
-      iconLabel: 'Kymo',
-      label: 'Kymographs',
-      component: () => <KymographsPanel {...childProps} />,
-    },
-    {
-      name: 'analysisPlots',
-      iconName: 'tab-studies',
-      iconLabel: 'Plots',
-      label: 'Analysis Plots',
-      component: () => <AnalysisPlotsPanel {...childProps} />,
+      iconLabel: 'Analysis',
+      label: 'Ovi Labs Analysis',
+      component: () => <AnalysisContainerPanel {...childProps} />,
     },
   ];
 }

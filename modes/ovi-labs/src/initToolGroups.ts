@@ -18,6 +18,7 @@ function initToolGroups(extensionManager, toolGroupService) {
       { toolName: toolNames.EllipticalROI },
       { toolName: toolNames.CircleROI },
       { toolName: toolNames.RectangleROI },
+      { toolName: toolNames.RotatableRectangleROI },
       { toolName: toolNames.CalibrationLine },
     ],
     enabled: [{ toolName: toolNames.ImageOverlayViewer }],

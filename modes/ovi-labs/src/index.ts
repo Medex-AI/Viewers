@@ -2,6 +2,7 @@ import { id } from './id';
 import toolbarButtons from './toolbarButtons';
 import initToolGroups from './initToolGroups';
 import { isSuitableForOviLabs } from './utils/seriesValidator';
+import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleROIBehavior';
 
 const ohif = {
   layout: '@ohif/extension-default.layoutTemplateModule.viewerLayout',
@@ -18,10 +19,7 @@ const dicomVideo = {
 };
 
 const oviLabsPanels = {
-  roiViewer: '@ohif/extension-ovi-labs.panelModule.roiViewer',
-  fftAnalysis: '@ohif/extension-ovi-labs.panelModule.fftAnalysis',
-  kymographs: '@ohif/extension-ovi-labs.panelModule.kymographs',
-  analysisPlots: '@ohif/extension-ovi-labs.panelModule.analysisPlots',
+  analysisContainer: '@ohif/extension-ovi-labs.panelModule.analysisContainer',
 };
 
 const extensionDependencies = {
@@ -103,6 +101,8 @@ function setSeriesFromQuery({ servicesManager, commandsManager }) {
 }
 
 function modeFactory({ modeConfiguration }) {
+  let teardownRotatableRectangleROIBehavior;
+
   return {
     id,
     routeName: 'ovi-labs',
@@ -115,6 +115,8 @@ function modeFactory({ modeConfiguration }) {
       uiModalService?.hide?.();
 
       initToolGroups(extensionManager, toolGroupService);
+      teardownRotatableRectangleROIBehavior?.();
+      teardownRotatableRectangleROIBehavior = setupRotatableRectangleROIBehavior();
 
       toolbarService.addButtons(toolbarButtons);
       toolbarService.createButtonSection('primary', [
@@ -125,6 +127,14 @@ function modeFactory({ modeConfiguration }) {
         'Layout',
         'MoreTools',
         'Cine',
+        'RotatableRectangleROI',
+      ]);
+      toolbarService.createButtonSection('measurementSection', [
+        'Length',
+        'Bidirectional',
+        'EllipticalROI',
+        'RectangleROI',
+        'CircleROI',
       ]);
       toolbarService.createButtonSection('moreToolsSection', [
         'Reset',
@@ -142,6 +152,8 @@ function modeFactory({ modeConfiguration }) {
       uiDialogService.hideAll();
       uiModalService.hide();
       toolGroupService.destroy();
+      teardownRotatableRectangleROIBehavior?.();
+      teardownRotatableRectangleROIBehavior = undefined;
     },
     validationTags: {
       study: [],
@@ -171,12 +183,7 @@ function modeFactory({ modeConfiguration }) {
             props: {
               leftPanels: [ohif.leftPanel],
               leftPanelResizable: true,
-              rightPanels: [
-                oviLabsPanels.roiViewer,
-                oviLabsPanels.fftAnalysis,
-                oviLabsPanels.kymographs,
-                oviLabsPanels.analysisPlots,
-              ],
+              rightPanels: [oviLabsPanels.analysisContainer],
               rightPanelResizable: true,
               viewports: [
                 {

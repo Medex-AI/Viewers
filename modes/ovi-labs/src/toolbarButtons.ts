@@ -94,6 +94,23 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    id: 'RotatableRectangleROI',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'tool-rectangle',
+      label: 'Analysis ROI',
+      tooltip: 'Rotatable temporal uterus analysis ROI selection',
+      commands: {
+        ...setToolActiveToolbar,
+        commandOptions: {
+          ...setToolActiveToolbar.commandOptions,
+          toolName: 'RotatableRectangleROI',
+        },
+      },
+      evaluate: 'evaluate.cornerstoneTool',
+    },
+  },
+  {
     id: 'CircleROI',
     uiType: 'ohif.toolButton',
     props: {
