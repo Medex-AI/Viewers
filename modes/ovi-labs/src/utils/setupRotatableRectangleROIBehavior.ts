@@ -3,6 +3,7 @@ import { annotation, Enums } from '@cornerstonejs/tools';
 
 const TOOL_NAME = 'RotatableRectangleROI';
 const TOOL_GROUP_ID = 'default';
+const MEDEX_ORANGE = 'rgb(237, 137, 54)';
 
 export default function setupRotatableRectangleROIBehavior() {
   const toolGroupStyles = annotation.config.style.getToolGroupToolStyles(TOOL_GROUP_ID) || {};
@@ -12,6 +13,9 @@ export default function setupRotatableRectangleROIBehavior() {
     ...toolGroupStyles,
     [TOOL_NAME]: {
       ...toolSpecificStyles,
+      color: MEDEX_ORANGE,
+      colorHighlighted: MEDEX_ORANGE,
+      colorSelected: MEDEX_ORANGE,
       textBoxVisibility: false,
     },
   });
@@ -43,6 +47,9 @@ export default function setupRotatableRectangleROIBehavior() {
     }
 
     annotation.config.style.setAnnotationStyles(newAnnotation.annotationUID, {
+      color: MEDEX_ORANGE,
+      colorHighlighted: MEDEX_ORANGE,
+      colorSelected: MEDEX_ORANGE,
       textBoxVisibility: false,
     });
 

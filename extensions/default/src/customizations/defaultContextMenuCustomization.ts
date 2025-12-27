@@ -5,7 +5,8 @@ export default {
       // Get the items from the UI Customization for the menu name (and have a custom name)
       {
         id: 'forExistingMeasurement',
-        selector: ({ nearbyToolData }) => !!nearbyToolData,
+        selector: ({ nearbyToolData }) =>
+          !!nearbyToolData && nearbyToolData?.metadata?.toolName !== 'RotatableRectangleROI',
         items: [
           {
             label: 'Delete measurement',
