@@ -84,7 +84,7 @@ class RotatableRectangleROITool extends RectangleROITool {
         return;
       }
 
-      const cursor = cursors.MouseCursor.getDefinedCursor('move');
+      const cursor = cursors.MouseCursor.getDefinedCursor('crosshair');
       if (cursor) {
         cursors.elementCursor.setElementCursor(element, cursor);
       }
@@ -168,6 +168,8 @@ class RotatableRectangleROITool extends RectangleROITool {
           );
           if (handleIndex === ROTATION_HANDLE_INDEX) {
             cursorName = ROTATION_CURSOR_NAME;
+          } else if (handleIndex === -1) {
+            cursorName = 'move';
           } else if (handleIndex !== null && handleIndex !== undefined) {
             cursorName = this._getResizeCursorForHandle(
               currentAnnotation,
@@ -205,7 +207,7 @@ class RotatableRectangleROITool extends RectangleROITool {
         );
         cursors.elementCursor.setElementCursor(element, rotationCursor);
       } else {
-        const cursor = cursors.MouseCursor.getDefinedCursor(cursorName || 'auto');
+        const cursor = cursors.MouseCursor.getDefinedCursor(cursorName || 'crosshair');
         if (cursor) {
           cursors.elementCursor.setElementCursor(element, cursor);
         }

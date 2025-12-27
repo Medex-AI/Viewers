@@ -31,18 +31,18 @@ const AnalysisContainerPanel: React.FC<AnalysisContainerPanelProps> = ({
   servicesManager,
   extensionManager,
 }) => {
-  const [activeTab, setActiveTab] = useState<TabId>('fft');
+  const [activeTab, setActiveTab] = useState<TabId>('kymograph');
 
   const tabs: Tab[] = [
-    {
-      id: 'fft',
-      label: 'FFT',
-      component: FftAnalysisPanel,
-    },
     {
       id: 'kymograph',
       label: 'Kymograph',
       component: KymographsPanel,
+    },
+    {
+      id: 'fft',
+      label: 'FFT',
+      component: FftAnalysisPanel,
     },
     {
       id: 'plots',
