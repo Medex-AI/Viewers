@@ -5,6 +5,7 @@ const ROTATION_HANDLE_INDEX = 4;
 const DEFAULT_ROTATION_HANDLE_OFFSET = 24;
 const HANDLE_PROXIMITY = 6;
 const ROTATION_CURSOR_NAME = 'RotatableRectangleROI.Rotate';
+const ROTATION_CURSOR_COLOR = '#F47620';
 
 /**
  * Rotatable Rectangle ROI Tool
@@ -15,12 +16,17 @@ class RotatableRectangleROITool extends RectangleROITool {
   static toolName = 'RotatableRectangleROI';
 
   private rotationHandleOffset: number;
+  private _lastViewport: any;
 
   constructor(toolProps = {}, defaultToolProps = {}) {
     super(toolProps, defaultToolProps);
 
     this.rotationHandleOffset =
       toolProps?.configuration?.rotationHandleOffset ?? DEFAULT_ROTATION_HANDLE_OFFSET;
+    this._lastViewport = null;
+
+    this.configuration.calculateStats = false;
+    this.configuration.getTextLines = data => this._getRoiInfoTextLines(data);
 
     const baseAddNewAnnotation = this.addNewAnnotation;
     const baseRenderAnnotation = this.renderAnnotation;
@@ -96,7 +102,12 @@ class RotatableRectangleROITool extends RectangleROITool {
       }
 
       if (handleIndex === ROTATION_HANDLE_INDEX) {
-        cursors.setCursorForElement(element, ROTATION_CURSOR_NAME);
+        const rotationCursor = cursors.SVGMouseCursor.getDefinedCursor(
+          ROTATION_CURSOR_NAME,
+          true,
+          ROTATION_CURSOR_COLOR
+        );
+        cursors.elementCursor.setElementCursor(element, rotationCursor);
         return;
       }
 
@@ -152,7 +163,9 @@ class RotatableRectangleROITool extends RectangleROITool {
         );
 
         if (handle) {
-          const handleIndex = currentAnnotation.data?.handles?.activeHandleIndex;
+          const handleIndex = currentAnnotation.data?.handles?.points?.findIndex(
+            point => point === handle
+          );
           if (handleIndex === ROTATION_HANDLE_INDEX) {
             cursorName = ROTATION_CURSOR_NAME;
           } else if (handleIndex !== null && handleIndex !== undefined) {
@@ -185,7 +198,12 @@ class RotatableRectangleROITool extends RectangleROITool {
       }
 
       if (cursorName === ROTATION_CURSOR_NAME) {
-        cursors.setCursorForElement(element, ROTATION_CURSOR_NAME);
+        const rotationCursor = cursors.SVGMouseCursor.getDefinedCursor(
+          ROTATION_CURSOR_NAME,
+          true,
+          ROTATION_CURSOR_COLOR
+        );
+        cursors.elementCursor.setElementCursor(element, rotationCursor);
       } else {
         const cursor = cursors.MouseCursor.getDefinedCursor(cursorName || 'auto');
         if (cursor) {
@@ -278,7 +296,6 @@ class RotatableRectangleROITool extends RectangleROITool {
       if (!element) {
         return;
       }
-
       const cursor = cursors.MouseCursor.getDefinedCursor('auto');
       if (cursor) {
         cursors.elementCursor.setElementCursor(element, cursor);
@@ -286,6 +303,7 @@ class RotatableRectangleROITool extends RectangleROITool {
     };
 
     this.renderAnnotation = (enabledElement, svgDrawingHelper) => {
+      this._lastViewport = enabledElement.viewport;
       const renderStatus = baseRenderAnnotation(enabledElement, svgDrawingHelper);
       const { viewport } = enabledElement;
       const { element } = viewport;
@@ -504,6 +522,28 @@ class RotatableRectangleROITool extends RectangleROITool {
 
     const rotationHandle = this._getRotationHandleWorld(viewport, points);
     points[ROTATION_HANDLE_INDEX] = rotationHandle;
+
+    const textBox = annotation.data.handles.textBox;
+    if (textBox && !textBox.hasMoved) {
+      const rotationHandleCanvas = this._getRotationHandleCanvas(viewport, points);
+      const bottomLeftCanvas = viewport.worldToCanvas(points[0]);
+      const topRightCanvas = viewport.worldToCanvas(points[3]);
+      const centerCanvas = [
+        (bottomLeftCanvas[0] + topRightCanvas[0]) / 2,
+        (bottomLeftCanvas[1] + topRightCanvas[1]) / 2,
+      ];
+      const direction = [
+        rotationHandleCanvas[0] - centerCanvas[0],
+        rotationHandleCanvas[1] - centerCanvas[1],
+      ];
+      const length = Math.hypot(direction[0], direction[1]) || 1;
+      const unitDirection = [direction[0] / length, direction[1] / length];
+      const textBoxCanvas = [
+        rotationHandleCanvas[0] + unitDirection[0] * 12,
+        rotationHandleCanvas[1] + unitDirection[1] * 12,
+      ];
+      textBox.worldPosition = viewport.canvasToWorld(textBoxCanvas);
+    }
   }
 
   _getRotationHandleWorld(viewport, points) {
@@ -657,6 +697,44 @@ class RotatableRectangleROITool extends RectangleROITool {
     }
 
     return 'nesw-resize';
+  }
+
+  _getRoiInfoTextLines(data) {
+    const points = data?.handles?.points;
+    if (!points || points.length < 4) {
+      return [];
+    }
+
+    const width = Math.hypot(
+      points[1][0] - points[0][0],
+      points[1][1] - points[0][1],
+      points[1][2] - points[0][2]
+    );
+    const height = Math.hypot(
+      points[2][0] - points[0][0],
+      points[2][1] - points[0][1],
+      points[2][2] - points[0][2]
+    );
+    const center = [
+      (points[0][0] + points[3][0]) / 2,
+      (points[0][1] + points[3][1]) / 2,
+      (points[0][2] + points[3][2]) / 2,
+    ];
+    let angle =
+      (Math.atan2(points[1][1] - points[0][1], points[1][0] - points[0][0]) * 180) /
+      Math.PI;
+    if (this._lastViewport?.worldToCanvas) {
+      const startCanvas = this._lastViewport.worldToCanvas(points[0]);
+      const endCanvas = this._lastViewport.worldToCanvas(points[1]);
+      angle = (Math.atan2(endCanvas[1] - startCanvas[1], endCanvas[0] - startCanvas[0]) * 180) /
+        Math.PI;
+    }
+
+    return [
+      `W: ${width.toFixed(1)}  H: ${height.toFixed(1)}`,
+      `C: ${center[0].toFixed(1)}, ${center[1].toFixed(1)}`,
+      `R: ${angle.toFixed(1)} deg`,
+    ];
   }
 }
 

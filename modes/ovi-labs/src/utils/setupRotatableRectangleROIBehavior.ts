@@ -16,7 +16,10 @@ export default function setupRotatableRectangleROIBehavior() {
       color: MEDEX_ORANGE,
       colorHighlighted: MEDEX_ORANGE,
       colorSelected: MEDEX_ORANGE,
-      textBoxVisibility: false,
+      textBoxColor: MEDEX_ORANGE,
+      textBoxColorHighlighted: MEDEX_ORANGE,
+      textBoxColorSelected: MEDEX_ORANGE,
+      textBoxVisibility: true,
     },
   });
 
@@ -50,7 +53,10 @@ export default function setupRotatableRectangleROIBehavior() {
       color: MEDEX_ORANGE,
       colorHighlighted: MEDEX_ORANGE,
       colorSelected: MEDEX_ORANGE,
-      textBoxVisibility: false,
+      textBoxColor: MEDEX_ORANGE,
+      textBoxColorHighlighted: MEDEX_ORANGE,
+      textBoxColorSelected: MEDEX_ORANGE,
+      textBoxVisibility: true,
     });
 
     const frameOfReferenceUID = newAnnotation.metadata?.FrameOfReferenceUID;
