@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { eventTarget, Enums as csEnums } from '@cornerstonejs/core';
+import { eventTarget, Enums as csEnums, metaData } from '@cornerstonejs/core';
 import { annotation, Enums as toolEnums } from '@cornerstonejs/tools';
 import { useViewportGrid } from '@ohif/ui-next';
 
@@ -41,6 +41,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     index: null,
     total: null,
   });
+  const [showSpacingWarning, setShowSpacingWarning] = useState(false);
   const [segmentationSelections] = useState<Record<string, boolean>>({
     uterineCavity: false,
     endometrium: false,
@@ -138,7 +139,39 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       return;
     }
 
-    const canvasPoints = points.map(point => viewport.worldToCanvas(point));
+    // Calculate width and height in world coordinates (physical units)
+    const widthWorld = Math.hypot(
+      points[1][0] - points[0][0],
+      points[1][1] - points[0][1],
+      points[1][2] - points[0][2]
+    );
+    const heightWorld = Math.hypot(
+      points[2][0] - points[0][0],
+      points[2][1] - points[0][1],
+      points[2][2] - points[0][2]
+    );
+
+    const elementWidth = element?.clientWidth || 0;
+    const elementHeight = element?.clientHeight || 0;
+    const sourceWidth = sourceCanvas.width;
+    const sourceHeight = sourceCanvas.height;
+    const scaleX =
+      elementWidth > 0 && sourceWidth > 0 ? sourceWidth / elementWidth : 1;
+    const scaleY =
+      elementHeight > 0 && sourceHeight > 0 ? sourceHeight / elementHeight : 1;
+
+    let canvasPoints = points.map(point => viewport.worldToCanvas(point));
+    if (scaleX > 1.01 || scaleY > 1.01) {
+      const maxX = Math.max(...canvasPoints.map(point => point[0]));
+      const maxY = Math.max(...canvasPoints.map(point => point[1]));
+      const needsNormalization =
+        (elementWidth > 0 && maxX > elementWidth * 1.2) ||
+        (elementHeight > 0 && maxY > elementHeight * 1.2);
+
+      if (needsNormalization) {
+        canvasPoints = canvasPoints.map(point => [point[0] / scaleX, point[1] / scaleY]);
+      }
+    }
     const bottomLeft = canvasPoints[0];
     const bottomRight = canvasPoints[1];
     const topLeft = canvasPoints[2];
@@ -169,11 +202,26 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       return;
     }
 
-    const imageData = viewport.getImageData?.();
-    const spacing = imageData?.getSpacing?.() || imageData?.spacing;
-    const spacingX = Array.isArray(spacing) ? spacing[0] : null;
-    const spacingY = Array.isArray(spacing) ? spacing[1] : null;
-    const hasSpacing = !!(spacingX && spacingY);
+    const imageId =
+      roiAnnotation?.metadata?.referencedImageId || viewport.getCurrentImageId?.();
+    const calibratedSpacing = imageId
+      ? metaData.get('calibratedPixelSpacing', imageId)
+      : null;
+    const imagePlaneModule = imageId ? metaData.get('imagePlaneModule', imageId) : null;
+
+    const spacingX =
+      calibratedSpacing?.columnPixelSpacing ?? imagePlaneModule?.columnPixelSpacing ?? null;
+    const spacingY =
+      calibratedSpacing?.rowPixelSpacing ?? imagePlaneModule?.rowPixelSpacing ?? null;
+    const hasSpacing =
+      typeof spacingX === 'number' &&
+      typeof spacingY === 'number' &&
+      Number.isFinite(spacingX) &&
+      Number.isFinite(spacingY) &&
+      spacingX > 0 &&
+      spacingY > 0 &&
+      !imagePlaneModule?.usingDefaultValues;
+    setShowSpacingWarning(prev => (prev === !hasSpacing ? prev : !hasSpacing));
 
     const currentIndex = viewport.getCurrentImageIdIndex?.();
     const totalSlices = viewport.getNumberOfSlices?.();
@@ -196,7 +244,9 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     ctx.scale(scale, scale);
     ctx.rotate(-angle);
     ctx.translate(-center[0], -center[1]);
-    ctx.drawImage(sourceCanvas, 0, 0);
+    const drawWidth = elementWidth || sourceWidth;
+    const drawHeight = elementHeight || sourceHeight;
+    ctx.drawImage(sourceCanvas, 0, 0, drawWidth, drawHeight);
     ctx.restore();
 
     const roiWidth = width * scale;
@@ -214,10 +264,32 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     ctx.lineWidth = 4;
     ctx.strokeRect(0.75, 0.75, PREVIEW_WIDTH - 1.5, PREVIEW_HEIGHT - 1.5);
 
-    if (hasSpacing) {
-      const tickEveryMm = 100;
-      const tickEveryPxX = (tickEveryMm / spacingX) * scale;
-      const tickEveryPxY = (tickEveryMm / spacingY) * scale;
+    // Use world coordinates (already in mm) for grid calculations
+    const roiWidthUnits = widthWorld;
+    const roiHeightUnits = heightWorld;
+    const maxUnits = Math.max(roiWidthUnits, roiHeightUnits);
+
+    const targetTicks = 5;
+    const rawStep = maxUnits > 0 ? maxUnits / targetTicks : 10;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep || 1)));
+    const baseSteps = [1, 2, 5, 10];
+    let tickEveryUnit = baseSteps[baseSteps.length - 1] * magnitude;
+    for (const base of baseSteps) {
+      const candidate = base * magnitude;
+      if (candidate >= rawStep) {
+        tickEveryUnit = candidate;
+        break;
+      }
+    }
+
+    // Convert tick spacing from world units (mm) to canvas pixels
+    const roiWidthPx = width * scale;
+    const roiHeightPx = height * scale;
+    const tickEveryPxX = roiWidthUnits > 0 ? (tickEveryUnit / roiWidthUnits) * roiWidthPx : 0;
+    const tickEveryPxY = roiHeightUnits > 0 ? (tickEveryUnit / roiHeightUnits) * roiHeightPx : 0;
+    const unitLabel = hasSpacing ? 'mm' : 'px';
+
+    if (tickEveryPxX > 6 || tickEveryPxY > 6) {
       const tickLength = 16;
       const labelOffset = 6;
       const fontSize = 40;
@@ -230,7 +302,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       if (tickEveryPxX > 6) {
         let tickIndex = 0;
         for (let x = 0; x <= PREVIEW_WIDTH + 0.5; x += tickEveryPxX) {
-          const labelCm = (tickIndex * tickEveryMm) / 10;
+          const labelValue = tickIndex * tickEveryUnit;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
           ctx.beginPath();
@@ -238,7 +310,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           ctx.lineTo(x, tickLength);
           ctx.stroke();
           if (tickIndex !== 0) {
-            ctx.fillText(`${labelCm}cm`, x, tickLength + labelOffset);
+            ctx.fillText(`${labelValue}${unitLabel}`, x, tickLength + labelOffset);
           }
 
           tickIndex += 1;
@@ -248,7 +320,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       if (tickEveryPxY > 6) {
         let tickIndex = 0;
         for (let y = 0; y <= PREVIEW_HEIGHT + 0.5; y += tickEveryPxY) {
-          const labelCm = (tickIndex * tickEveryMm) / 10;
+          const labelValue = tickIndex * tickEveryUnit;
           ctx.textAlign = 'left';
           ctx.textBaseline = 'middle';
           ctx.beginPath();
@@ -256,7 +328,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           ctx.lineTo(tickLength, y);
           ctx.stroke();
           if (tickIndex !== 0) {
-            ctx.fillText(`${labelCm}cm`, tickLength + labelOffset, y);
+            ctx.fillText(`${labelValue}${unitLabel}`, tickLength + labelOffset, y);
           }
 
           tickIndex += 1;
@@ -386,6 +458,11 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         {segmentationPending ? (
           <div className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
             Segmentation pending
+          </div>
+        ) : null}
+        {showSpacingWarning ? (
+          <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
+            Pixel spacing missing, units in px
           </div>
         ) : null}
         <div
