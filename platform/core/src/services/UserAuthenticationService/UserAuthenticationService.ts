@@ -30,14 +30,17 @@ class UserAuthenticationService extends PubSubService {
     _getState: () => {
       const user = authService?.getCurrentUser() || this.currentUser;
       const isAuthenticated = authService?.isAuthenticated() || false;
-      
-      console.log('UserAuthenticationService _getState - user:', user, 'authenticated:', isAuthenticated);
-      
+
+      // Read auth enabled flag from environment variable
+      const authEnabled = process.env.REACT_APP_ENABLE_AUTH !== 'false';
+
+      console.log('UserAuthenticationService _getState - user:', user, 'authenticated:', isAuthenticated, 'enabled:', authEnabled);
+
       return {
         isAuthenticated,
         user,
         token: authService?.getToken() || null,
-        enabled: true, // Always enable authentication
+        enabled: authEnabled,
       };
     },
     _setUser: (user: any) => {

@@ -30,7 +30,9 @@ class AuthServiceImpl implements AuthService {
 
   constructor() {
     // Handle environment variable safely for browser environment
-    this.baseUrl = (typeof process !== 'undefined' && process.env?.REACT_APP_AUTH_API_URL) || 'http://localhost:5000/api/auth';
+    this.baseUrl =
+      (typeof process !== 'undefined' && process.env?.REACT_APP_AUTH_API_URL) ||
+      '/api/auth';
     // Initialize from localStorage on startup
     this.initializeFromStorage();
     // Start monitoring session expiration

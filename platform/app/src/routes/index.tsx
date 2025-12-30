@@ -121,11 +121,11 @@ const createRoutes = ({
     props: { children: WorkList, servicesManager, extensionManager },
   };
 
-  // Add root route to serve WorkList directly at '/' (temporary - bypassing auth)
+  // Root route to serve WorkList at '/' (authenticated)
   const RootWorkListRoute = {
     path: '/',
     children: DataSourceWrapper,
-    private: false, // Temporarily make this public to bypass authentication
+    private: true,
     props: { children: WorkList, servicesManager, extensionManager },
   };
 
