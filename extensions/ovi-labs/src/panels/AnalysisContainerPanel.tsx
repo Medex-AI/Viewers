@@ -92,7 +92,7 @@ const AnalysisContainerPanel: React.FC<AnalysisContainerPanelProps> = ({
         </div>
 
         {/* Active Tab Content */}
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-y-auto">
           <ActiveTabComponent {...childProps} />
         </div>
       </div>

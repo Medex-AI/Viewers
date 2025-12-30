@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { eventTarget, Enums as csEnums, metaData } from '@cornerstonejs/core';
+import { cache, eventTarget, Enums as csEnums, metaData } from '@cornerstonejs/core';
 import { annotation, Enums as toolEnums } from '@cornerstonejs/tools';
 import { useViewportGrid } from '@ohif/ui-next';
+import {
+  getRoiAnalysisData,
+  setRoiAnalysisData,
+} from '../utils/roiAnalysisDataStore';
+import {
+  getKymographSettings,
+  subscribeKymographSettings,
+} from '../utils/kymographSettingsStore';
 
 interface RoiViewerPanelProps {
   commandsManager?: any;
@@ -14,6 +22,7 @@ const TOOL_GROUP_ID = 'default';
 const MEDEX_ORANGE = '#F47620';
 const PREVIEW_WIDTH = 640;
 const PREVIEW_HEIGHT = 480;
+const MAX_ANALYSIS_SAMPLES = 256;
 const SEGMENTATION_LABELS = [
   { id: 'uterineCavity', label: 'Uterine Cavity', color: '#22D3EE' },
   { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
@@ -49,8 +58,207 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     cervix: false,
   });
   const [segmentationModel, setSegmentationModel] = useState('medsam');
+  const [kymographSettings, setKymographSettings] = useState(getKymographSettings());
   const [{ activeViewportId }] = useViewportGrid();
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
+
+  useEffect(() => {
+    const unsubscribe = subscribeKymographSettings(settings => {
+      setKymographSettings(settings);
+    });
+    return unsubscribe;
+  }, []);
+
+  const buildRoiAnalysisData = useCallback(() => {
+    if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+    if (!viewport) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
+    if (points.length < 4) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const imageIds = viewport.getImageIds?.() || [];
+    const currentImageId = viewport.getCurrentImageId?.();
+    const resolvedImageIds = [
+      ...(currentImageId ? [currentImageId] : []),
+      ...imageIds.filter(id => id !== currentImageId),
+    ];
+
+    if (!resolvedImageIds.length) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const existing = getRoiAnalysisData();
+    if (
+      existing &&
+      existing.annotationUID === roiAnnotation.annotationUID &&
+      existing.roiRevision === roiRevision &&
+      existing.imageIds.length === resolvedImageIds.length &&
+      existing.imageIds.every((id, index) => id === resolvedImageIds[index])
+    ) {
+      return;
+    }
+
+    const getWorldToIndex = () => {
+      if (viewport.worldToIndex) {
+        return (point: number[]) => viewport.worldToIndex(point);
+      }
+
+      const imageId = currentImageId || resolvedImageIds[0];
+      if (!imageId) {
+        return null;
+      }
+
+      const imagePlane = metaData.get('imagePlaneModule', imageId);
+      const orientation = imagePlane?.imageOrientationPatient;
+      const position = imagePlane?.imagePositionPatient;
+      const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+      const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+      if (!orientation || !position) {
+        return null;
+      }
+
+      const rowCosines = [orientation[0], orientation[1], orientation[2]];
+      const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+      return (point: number[]) => {
+        const dx = point[0] - position[0];
+        const dy = point[1] - position[1];
+        const dz = point[2] - position[2];
+        const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+        const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+        return [col, row, 0];
+      };
+    };
+
+    const worldToIndex = getWorldToIndex();
+    if (!worldToIndex) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const indexPoints = points.map(point => worldToIndex(point));
+    if (indexPoints.some(point => !point || point.length < 2)) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const bottomLeft = indexPoints[0];
+    const bottomRight = indexPoints[1];
+    const topLeft = indexPoints[2];
+
+    const widthVec = [
+      bottomRight[0] - bottomLeft[0],
+      bottomRight[1] - bottomLeft[1],
+      (bottomRight[2] || 0) - (bottomLeft[2] || 0),
+    ];
+    const heightVec = [
+      topLeft[0] - bottomLeft[0],
+      topLeft[1] - bottomLeft[1],
+      (topLeft[2] || 0) - (bottomLeft[2] || 0),
+    ];
+
+    const widthLength = Math.hypot(widthVec[0], widthVec[1]);
+    const heightLength = Math.hypot(heightVec[0], heightVec[1]);
+
+    if (!widthLength || !heightLength) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    const widthSamples = Math.max(1, Math.round(widthLength));
+    const heightSamples = Math.max(1, Math.round(heightLength));
+    const step = Math.max(
+      1,
+      Math.ceil(Math.max(widthSamples, heightSamples) / MAX_ANALYSIS_SAMPLES)
+    );
+    const outputWidth = Math.max(1, Math.floor(widthSamples / step));
+    const outputHeight = Math.max(1, Math.floor(heightSamples / step));
+
+    const unitWidth = [widthVec[0] / widthSamples, widthVec[1] / widthSamples];
+    const unitHeight = [heightVec[0] / heightSamples, heightVec[1] / heightSamples];
+
+    const frames: Float32Array[] = [];
+    const frameImageIds: string[] = [];
+    let spacing: { row: number | null; column: number | null } = { row: null, column: null };
+
+    resolvedImageIds.forEach(imageId => {
+      const image = cache.getImage(imageId);
+      const pixelData = image?.getPixelData?.() ?? image?.pixelData;
+      const columns = image?.columns ?? image?.width ?? 0;
+      const rows = image?.rows ?? image?.height ?? 0;
+
+      if (!pixelData || !columns || !rows) {
+        return;
+      }
+
+      if (!spacing.row || !spacing.column) {
+        const calibratedSpacing = metaData.get('calibratedPixelSpacing', imageId);
+        const imagePlane = metaData.get('imagePlaneModule', imageId);
+        spacing = {
+          column:
+            calibratedSpacing?.columnPixelSpacing ??
+            imagePlane?.columnPixelSpacing ??
+            null,
+          row:
+            calibratedSpacing?.rowPixelSpacing ?? imagePlane?.rowPixelSpacing ?? null,
+        };
+      }
+
+      const frameData = new Float32Array(outputWidth * outputHeight);
+      let outputIndex = 0;
+
+      for (let rowIndex = 0; rowIndex < outputHeight; rowIndex += 1) {
+        const rowOffset = rowIndex * step + 0.5;
+        const baseX = bottomLeft[0] + unitHeight[0] * rowOffset + unitWidth[0] * 0.5;
+        const baseY = bottomLeft[1] + unitHeight[1] * rowOffset + unitWidth[1] * 0.5;
+
+        for (let colIndex = 0; colIndex < outputWidth; colIndex += 1) {
+          const colOffset = colIndex * step;
+          const sampleX = baseX + unitWidth[0] * colOffset;
+          const sampleY = baseY + unitWidth[1] * colOffset;
+
+          const col = Math.min(columns - 1, Math.max(0, Math.round(sampleX)));
+          const row = Math.min(rows - 1, Math.max(0, Math.round(sampleY)));
+          const value = pixelData[row * columns + col];
+          frameData[outputIndex] = Number.isFinite(value) ? value : 0;
+          outputIndex += 1;
+        }
+      }
+
+      frames.push(frameData);
+      frameImageIds.push(imageId);
+    });
+
+    if (!frames.length) {
+      setRoiAnalysisData(null);
+      return;
+    }
+
+    setRoiAnalysisData({
+      annotationUID: roiAnnotation.annotationUID,
+      roiRevision,
+      imageIds: frameImageIds,
+      width: outputWidth,
+      height: outputHeight,
+      step,
+      frames,
+      spacing,
+      createdAt: Date.now(),
+    });
+  }, [roiAnnotation, activeViewportId, cornerstoneViewportService, roiRevision]);
 
   const getSelectedAnalysisRoi = () => {
     const [selectedAnnotationUID] = annotation.selection.getAnnotationsSelected() || [];
@@ -337,12 +545,43 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       ctx.lineWidth = originalLineWidth;
     }
 
+    if (kymographSettings.showProfileLine) {
+      const isHorizontalProfile =
+        kymographSettings.spatialAxis === 'major'
+          ? widthWorld >= heightWorld
+          : widthWorld < heightWorld;
+
+      ctx.strokeStyle = '#22C55E';
+      ctx.lineWidth = 4;
+      ctx.setLineDash([8, 4]);
+
+      if (isHorizontalProfile) {
+        const midY = PREVIEW_HEIGHT / 2;
+        ctx.beginPath();
+        ctx.moveTo(0, midY);
+        ctx.lineTo(PREVIEW_WIDTH, midY);
+        ctx.stroke();
+      } else {
+        const midX = PREVIEW_WIDTH / 2;
+        ctx.beginPath();
+        ctx.moveTo(midX, 0);
+        ctx.lineTo(midX, PREVIEW_HEIGHT);
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([]);
+    }
+
     setRoiPreviewUrl(previewCanvas.toDataURL('image/png'));
-  }, [roiAnnotation, activeViewportId, cornerstoneViewportService]);
+  }, [roiAnnotation, activeViewportId, cornerstoneViewportService, kymographSettings]);
 
   useEffect(() => {
     renderRoiPreview();
   }, [renderRoiPreview, roiRevision]);
+
+  useEffect(() => {
+    buildRoiAnalysisData();
+  }, [buildRoiAnalysisData]);
 
   useEffect(() => {
     if (!activeViewportId || !cornerstoneViewportService) {
@@ -357,6 +596,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
 
     const handleRender = () => {
       renderRoiPreview();
+      buildRoiAnalysisData();
     };
 
     element.addEventListener(csEnums.Events.IMAGE_RENDERED, handleRender);
@@ -366,7 +606,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       element.removeEventListener(csEnums.Events.IMAGE_RENDERED, handleRender);
       window.removeEventListener('resize', handleRender);
     };
-  }, [activeViewportId, cornerstoneViewportService, renderRoiPreview]);
+  }, [activeViewportId, cornerstoneViewportService, renderRoiPreview, buildRoiAnalysisData]);
 
   const hasAnalysisRoi = !!roiAnnotation;
   const hasPreview = hasAnalysisRoi && !!roiPreviewUrl;
@@ -484,14 +724,29 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         <div className="flex items-center justify-between">
           <label className="flex flex-1 items-center text-gray-400">
             <span className="mr-2">Segmentation Model</span>
-            <select
-              className="ml-auto rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-200"
-              value={segmentationModel}
-              onChange={evt => setSegmentationModel(evt.target.value)}
-            >
-              <option value="medsam">MedSAM</option>
-              <option value="unet-uterine">UNet-Uterine</option>
-            </select>
+            <div className="relative ml-auto">
+              <select
+                className="appearance-none rounded border border-gray-700 bg-gray-900 px-2 py-1 pr-6 text-[11px] text-gray-200"
+                value={segmentationModel}
+                onChange={evt => setSegmentationModel(evt.target.value)}
+              >
+                <option value="medsam">MedSAM</option>
+                <option value="unet-uterine">UNet-Uterine</option>
+              </select>
+              <svg
+                className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-200"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 9l-7 7-7-7"
+                />
+              </svg>
+            </div>
           </label>
         </div>
         <div className="grid grid-cols-2 gap-x-4 gap-y-2">
