@@ -6,8 +6,12 @@ import {
 import {
   getKymographSettings,
   setKymographSettings,
-  subscribeKymographSettings,
 } from '../utils/kymographSettingsStore';
+import {
+  getFrameRate,
+  setFrameRate,
+  subscribeFrameRate,
+} from '../utils/frameRateStore';
 
 interface KymographsPanelProps {
   commandsManager?: any;
@@ -231,12 +235,13 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
   servicesManager,
   extensionManager,
 }) => {
-  const [selectedColormap, setSelectedColormap] = useState('grayscale');
-  const [spatialAxis, setSpatialAxis] = useState<'major' | 'minor'>(
-    getKymographSettings().spatialAxis
-  );
-  const [showProfileLine, setShowProfileLine] = useState(getKymographSettings().showProfileLine);
+  const initialSettings = getKymographSettings();
+  const [selectedColormap, setSelectedColormap] = useState(initialSettings.colormap);
+  const [spatialAxis, setSpatialAxis] = useState<'major' | 'minor'>(initialSettings.spatialAxis);
+  const [showProfileLine, setShowProfileLine] = useState(initialSettings.showProfileLine);
   const [analysisData, setAnalysisData] = useState(getRoiAnalysisData());
+  const [frameRateValue, setFrameRateValue] = useState(getFrameRate());
+  const [frameRateInput, setFrameRateInput] = useState(getFrameRate().toString());
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -247,8 +252,16 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
   }, []);
 
   useEffect(() => {
-    setKymographSettings({ spatialAxis, showProfileLine });
-  }, [spatialAxis, showProfileLine]);
+    const unsubscribe = subscribeFrameRate(value => {
+      setFrameRateValue(value);
+      setFrameRateInput(value.toString());
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    setKymographSettings({ spatialAxis, colormap: selectedColormap, showProfileLine });
+  }, [spatialAxis, selectedColormap, showProfileLine]);
 
   const axisOption =
     SPATIAL_AXIS_OPTIONS.find(option => option.value === spatialAxis) ||
@@ -406,8 +419,10 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
       return baseSteps[baseSteps.length - 1] * magnitude;
     };
 
-    const tickEveryTimeUnit = calculateTickSpacing(timeCount);
-    const tickEveryTimePixel = (tickEveryTimeUnit / timeCount) * imageWidth;
+    const durationSeconds = frameRateValue > 0 ? timeCount / frameRateValue : timeCount;
+    const tickEveryTimeUnit = calculateTickSpacing(durationSeconds);
+    const tickEveryTimePixel =
+      durationSeconds > 0 ? (tickEveryTimeUnit / durationSeconds) * imageWidth : 0;
 
     const tickEverySpatialUnit = calculateTickSpacing(spatialUnitLength);
     const tickEverySpatialPixel = (tickEverySpatialUnit / spatialUnitLength) * imageHeight;
@@ -425,7 +440,7 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
       let tickIndex = 0;
       const bottomY = topMargin + imageHeight;
       for (let x = leftMargin; x <= leftMargin + imageWidth + 0.5; x += tickEveryTimePixel) {
-        const labelValue = Math.round(tickIndex * tickEveryTimeUnit);
+        const labelValue = tickIndex * tickEveryTimeUnit;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         ctx.beginPath();
@@ -433,14 +448,14 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
         ctx.lineTo(x, bottomY + tickLength);
         ctx.stroke();
         if (tickIndex !== 0) {
-          ctx.fillText(`${labelValue}`, x, bottomY + tickLength + labelOffset);
+          ctx.fillText(labelValue.toFixed(2), x, bottomY + tickLength + labelOffset);
         }
         tickIndex += 1;
       }
 
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillText('Frame', containerWidth / 2, containerHeight - 2);
+      ctx.fillText('Time (s)', containerWidth / 2, containerHeight - 2);
     }
 
     if (tickEverySpatialPixel > 6) {
@@ -461,9 +476,56 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
     }
   }, [kymograph, selectedColormap, analysisData]);
 
-  return (
+    return (
     <div className="flex h-full w-full flex-col overflow-y-auto bg-black p-4 text-white">
       <div className="mb-3 flex flex-col gap-2 text-[11px]">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-400">Frame rate (fps)</span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="h-6 w-6 rounded border border-gray-700 text-[12px] text-gray-200 hover:bg-gray-800"
+              onClick={() => {
+                const nextValue = Math.max(1, (Number(frameRateInput) || 1) - 1);
+                const fixed = Number(nextValue.toFixed(0));
+                setFrameRateInput(fixed.toString());
+                setFrameRate(fixed);
+              }}
+              aria-label="Decrease frame rate"
+            >
+              -
+            </button>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              className="w-20 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-right text-[11px] text-gray-200"
+              value={frameRateInput}
+              onChange={evt => {
+                const nextValue = evt.target.value;
+                setFrameRateInput(nextValue);
+                const parsed = Number(nextValue);
+                if (Number.isFinite(parsed) && parsed >= 1) {
+                  setFrameRate(parsed);
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="h-6 w-6 rounded border border-gray-700 text-[12px] text-gray-200 hover:bg-gray-800"
+              onClick={() => {
+                const nextValue = (Number(frameRateInput) || 1) + 1;
+                const fixed = Number(nextValue.toFixed(0));
+                setFrameRateInput(fixed.toString());
+                setFrameRate(fixed);
+              }}
+              aria-label="Increase frame rate"
+            >
+              +
+            </button>
+          </div>
+        </div>
         <div className="flex items-center justify-between">
           <span className="text-gray-400">Spatial axis</span>
           <Dropdown

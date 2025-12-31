@@ -23,7 +23,7 @@ function WrappedCinePlayer({
       return;
     }
 
-    const { isPlaying = false, frameRate = 24 } = cines[viewportId];
+    const { isPlaying = false, frameRate = 8 } = cines[viewportId];
     const validFrameRate = Math.max(frameRate, 1);
 
     return isPlaying
@@ -38,7 +38,7 @@ function WrappedCinePlayer({
 
     const { viewports } = viewportGridService.getState();
     const { displaySetInstanceUIDs } = viewports.get(viewportId);
-    let frameRate = 24;
+    let frameRate = 8;
     let isPlaying = cines[viewportId]?.isPlaying || false;
     displaySetInstanceUIDs.forEach(displaySetInstanceUID => {
       const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);

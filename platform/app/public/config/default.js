@@ -253,6 +253,8 @@ window.config = {
         omitQuotationForMultipartRequest: true,
         bulkDataURI: {
           enabled: true,
+          startsWith: 'http://localhost/',
+          prefixWith: '/',
           // This is an example config that can be used to fix the retrieve URL
           // where it has the wrong prefix (eg a canned prefix).  It is better to
           // just use the correct prefix out of the box, but that is sometimes hard

@@ -92,6 +92,7 @@ import {
   ToolFreehandPolygon,
   ToolFreehandRoi,
   ToolFreehand,
+  ToolFreehandThin,
   ToolFusionColor,
   ToolInvert,
   ToolLayoutDefault,
@@ -192,6 +193,7 @@ import ExternalLink from './Sources/ExternalLink';
 import OHIFLogoColorDarkBackground from './Sources/OHIFLogoColorDarkBackground';
 import Magnifier from './Sources/Magnifier';
 import LoadingOHIFMark from './Sources/LoadingOHIFMark';
+import LoadingMedexMark from './Sources/LoadingMedexMark';
 import ArrowLeftBold from './Sources/ArrowLeftBold';
 import Pencil from './Sources/Pencil';
 import NotificationWarning from './Sources/NotificationWarning';
@@ -526,6 +528,7 @@ export const Icons = {
   Play,
   Link,
   LoadingOHIFMark,
+  LoadingMedexMark,
   ArrowLeft: ChevronClosed,
   ArrowRight,
   ArrowLeftBold,
@@ -588,6 +591,7 @@ export const Icons = {
   'prev-arrow': (props: IconProps) => Icons.ArrowLeftBold(props),
   'next-arrow': (props: IconProps) => Icons.ArrowRightBold(props),
   'loading-ohif-mark': (props: IconProps) => LoadingOHIFMark(props),
+  'loading-medex-mark': (props: IconProps) => LoadingMedexMark(props),
   magnifier: (props: IconProps) => Magnifier(props),
   'status-alert-warning': (props: IconProps) => StatusWarning(props),
   'logo-dark-background': (props: IconProps) => OHIFLogoColorDarkBackground(props),
@@ -652,6 +656,8 @@ export const Icons = {
   'icon-tool-freehand-roi': (props: IconProps) => ToolFreehandRoi(props),
   'icon-tool-spline-roi': (props: IconProps) => ToolSplineRoi(props),
   'tool-freehand': (props: IconProps) => ToolFreehand(props),
+  'tool-freehand-thin': (props: IconProps) => ToolFreehandThin(props),
+  'tool-freehand-line-thin': (props: IconProps) => ToolFreehandThin(props),
   'tool-fusion-color': (props: IconProps) => ToolFusionColor(props),
   'tool-invert': (props: IconProps) => ToolInvert(props),
   'tool-layout-default': (props: IconProps) => ToolLayoutDefault(props),

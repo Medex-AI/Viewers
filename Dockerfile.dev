@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7-labs
 # Development Dockerfile for OHIF Viewer with hot reload
 # This builds a development container that watches for file changes
+# Source code is volume-mounted, dependencies installed at runtime
 
 FROM node:20.18.1-slim
 
@@ -9,41 +9,17 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3 \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /usr/src/app
 
-# Install bun for faster package management
-RUN npm install -g bun
-
 # Add node_modules/.bin to PATH
 ENV PATH=/usr/src/app/node_modules/.bin:$PATH
-
-# Copy package files first for better caching
-COPY package.json yarn.lock preinstall.js lerna.json ./
-
-# Copy workspace package.json files with --parents flag (requires BuildKit)
-COPY --parents \
-    ./addOns/package.json \
-    ./addOns/*/*/package.json \
-    ./extensions/*/package.json \
-    ./modes/*/package.json \
-    ./platform/*/package.json \
-    ./
-
-# Install dependencies
-RUN bun pm cache rm
-RUN bun install
-
-# Copy the rest of the application
-# Note: In development, source code will be volume-mounted
-# This COPY is just for initial setup
-COPY . .
 
 # Expose development server port
 EXPOSE 3000
 
 # Development server will be started via docker-compose command
-# Default: yarn dev
 CMD ["yarn", "dev"]

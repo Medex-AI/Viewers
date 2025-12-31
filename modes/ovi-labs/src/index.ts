@@ -3,6 +3,10 @@ import toolbarButtons from './toolbarButtons';
 import initToolGroups from './initToolGroups';
 import { isSuitableForOviLabs } from './utils/seriesValidator';
 import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleROIBehavior';
+import setupManualContourBehavior from './utils/setupManualContourBehavior';
+import setupManipulationToolsCursor from './utils/setupManipulationToolsCursor';
+import viewportClickCommandsCustomization from './customizations/viewportClickCommandsCustomization';
+import './styles.css';
 
 const ohif = {
   layout: '@ohif/extension-default.layoutTemplateModule.viewerLayout',
@@ -102,21 +106,35 @@ function setSeriesFromQuery({ servicesManager, commandsManager }) {
 
 function modeFactory({ modeConfiguration }) {
   let teardownRotatableRectangleROIBehavior;
+  let teardownManualContourBehavior;
+  let teardownManipulationToolsCursor;
 
   return {
     id,
     routeName: 'ovi-labs',
     displayName: 'Ovi Labs',
     onModeEnter: ({ servicesManager, extensionManager, commandsManager }: withAppTypes) => {
-      const { toolbarService, toolGroupService, uiDialogService, uiModalService } =
+      const { toolbarService, toolGroupService, uiDialogService, uiModalService, customizationService } =
         servicesManager.services;
 
       uiDialogService?.hideAll?.();
       uiModalService?.hide?.();
 
+      // Set custom viewport click commands to disable context menu for ManualContour and RotatableRectangleROI
+      customizationService?.addModeCustomizations?.([
+        {
+          id: 'cornerstoneViewportClickCommands',
+          ...viewportClickCommandsCustomization.cornerstoneViewportClickCommands,
+        },
+      ]);
+
       initToolGroups(extensionManager, toolGroupService);
       teardownRotatableRectangleROIBehavior?.();
+      teardownManualContourBehavior?.();
+      teardownManipulationToolsCursor?.();
       teardownRotatableRectangleROIBehavior = setupRotatableRectangleROIBehavior();
+      teardownManualContourBehavior = setupManualContourBehavior(servicesManager);
+      teardownManipulationToolsCursor = setupManipulationToolsCursor();
 
       toolbarService.addButtons(toolbarButtons);
       toolbarService.createButtonSection('primary', [
@@ -128,6 +146,7 @@ function modeFactory({ modeConfiguration }) {
         'MoreTools',
         'Cine',
         'RotatableRectangleROI',
+        'ManualContour',
       ]);
       toolbarService.createButtonSection('measurementSection', [
         'Length',
@@ -154,6 +173,10 @@ function modeFactory({ modeConfiguration }) {
       toolGroupService.destroy();
       teardownRotatableRectangleROIBehavior?.();
       teardownRotatableRectangleROIBehavior = undefined;
+      teardownManualContourBehavior?.();
+      teardownManualContourBehavior = undefined;
+      teardownManipulationToolsCursor?.();
+      teardownManipulationToolsCursor = undefined;
     },
     validationTags: {
       study: [],

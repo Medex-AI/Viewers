@@ -142,11 +142,16 @@ export default defineConfig({
   },
   server: {
     port: OHIF_PORT,
-    open: true,
+    open: process.env.NODE_ENV !== 'development', // Don't auto-open in Docker dev mode
+    host: '0.0.0.0', // Allow external connections (required for Docker)
     // Configure proxy
     proxy: {
       '/dicom-web': {
         target: process.env.REACT_APP_ORTHANC_URL || 'http://localhost:8042',
+        changeOrigin: true,
+      },
+      '/api/auth': {
+        target: process.env.AUTH_SERVICE_URL || 'http://localhost:5000',
         changeOrigin: true,
       },
       // Add conditional proxy based on env vars

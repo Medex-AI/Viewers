@@ -24,10 +24,10 @@ const PREVIEW_WIDTH = 640;
 const PREVIEW_HEIGHT = 480;
 const MAX_ANALYSIS_SAMPLES = 256;
 const SEGMENTATION_LABELS = [
-  { id: 'uterineCavity', label: 'Uterine Cavity', color: '#22D3EE' },
+  { id: 'uterineCavity', label: 'Uterine cavity', color: '#22D3EE' },
   { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
   { id: 'myometrium', label: 'Myometrium', color: '#FBBF24' },
-  { id: 'cervixCavity', label: 'Cervix Cavity', color: '#60A5FA' },
+  { id: 'cervixCavity', label: 'Cervix cavity', color: '#60A5FA' },
 ];
 /**
  * ROI Viewer Panel - Placeholder

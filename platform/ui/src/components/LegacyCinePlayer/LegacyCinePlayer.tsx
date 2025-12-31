@@ -11,7 +11,7 @@ const LegacyCinePlayer = ({
   minFrameRate = 1,
   maxFrameRate = 90,
   stepFrameRate = 1,
-  frameRate: defaultFrameRate = 24,
+  frameRate: defaultFrameRate = 8,
   onFrameRateChange = () => {},
   onPlayPauseChange = () => {},
   onClose = () => {},

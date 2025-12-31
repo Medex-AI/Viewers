@@ -1,10 +1,12 @@
 type KymographSettings = {
   spatialAxis: 'major' | 'minor';
+  colormap: string;
   showProfileLine: boolean;
 };
 
 let currentSettings: KymographSettings = {
   spatialAxis: 'major',
+  colormap: 'grayscale',
   showProfileLine: true,
 };
 

@@ -3,7 +3,6 @@ import PropTypes from 'prop-types';
 import debounce from 'lodash.debounce';
 
 import { Icons } from '@ohif/ui-next';
-import { Popover, PopoverContent, PopoverTrigger } from '../Popover/Popover';
 import { Button } from '../Button/Button';
 import { Numeric } from '../Numeric/Numeric';
 
@@ -31,7 +30,7 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
   minFrameRate = 1,
   maxFrameRate = 90,
   stepFrameRate = 1,
-  frameRate: defaultFrameRate = 24,
+  frameRate: defaultFrameRate = 8,
   onFrameRateChange = () => {},
   onPlayPauseChange = () => {},
   onClose = () => {},
@@ -40,7 +39,6 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
 }) => {
   const isDynamic = !!dynamicInfo?.numDimensionGroups;
   const [frameRate, setFrameRate] = useState(defaultFrameRate);
-  const [popoverOpen, setPopoverOpen] = useState(false);
   const debouncedSetFrameRate = useCallback(debounce(onFrameRateChange, 100), [onFrameRateChange]);
 
   const getPlayPauseIconName = () => (isPlaying ? 'icon-pause' : 'icon-play');
@@ -105,61 +103,33 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
         )}
 
         <div>
-          <Popover
-            open={popoverOpen}
-            onOpenChange={setPopoverOpen}
+          <Button
+            variant="ghost"
+            className="h-full border-none bg-transparent p-0 hover:bg-transparent"
           >
-            <PopoverTrigger asChild>
-              <Button
-                variant="ghost"
-                className="h-full border-none bg-transparent p-0 hover:bg-transparent"
-              >
-                <Numeric.Container
-                  mode="stepper"
-                  min={minFrameRate}
-                  max={maxFrameRate}
-                  step={stepFrameRate}
-                  value={frameRate}
-                  onChange={val => handleSetFrameRate(val as number)}
-                  className="border-0 bg-transparent"
-                >
-                  <Numeric.NumberStepper
-                    direction="horizontal"
-                    inputWidth="w-7 max-w-7"
-                  >
-                    <div className="flex items-center justify-center gap-1">
-                      <div className="text-foreground flex-shrink-0 text-center text-sm leading-[22px]">
-                        <span className="text-muted-foreground whitespace-nowrap text-xs">
-                          {' FPS'}
-                        </span>
-                      </div>
-                    </div>
-                  </Numeric.NumberStepper>
-                </Numeric.Container>
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent
-              side="top"
-              align="center"
-              className="cine-fps-range-popover z-50 w-auto p-2"
-              sideOffset={8}
+            <Numeric.Container
+              mode="stepper"
+              min={minFrameRate}
+              max={maxFrameRate}
+              step={stepFrameRate}
+              value={frameRate}
+              onChange={val => handleSetFrameRate(val as number)}
+              className="border-0 bg-transparent"
             >
-              <Numeric.Container
-                mode="singleRange"
-                min={minFrameRate}
-                max={maxFrameRate}
-                step={stepFrameRate}
-                value={frameRate}
-                onChange={val => handleSetFrameRate(val as number)}
-                className="h-6 px-2"
+              <Numeric.NumberStepper
+                direction="horizontal"
+                inputWidth="w-7 max-w-7"
               >
-                <Numeric.SingleRange
-                  showNumberInput={false}
-                  sliderClassName="w-40"
-                />
-              </Numeric.Container>
-            </PopoverContent>
-          </Popover>
+                <div className="flex items-center justify-center gap-1">
+                  <div className="text-foreground flex-shrink-0 text-center text-sm leading-[22px]">
+                    <span className="text-muted-foreground whitespace-nowrap text-xs">
+                      {' FPS'}
+                    </span>
+                  </div>
+                </div>
+              </Numeric.NumberStepper>
+            </Numeric.Container>
+          </Button>
         </div>
 
         <Button

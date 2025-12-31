@@ -216,6 +216,12 @@ function commandsModule({
         }
       }
 
+      const disallowedToolNames = optionsToUse.disallowedToolNames || [];
+      const nearbyToolName = optionsToUse.nearbyToolData?.metadata?.toolName;
+      if (nearbyToolName && disallowedToolNames.includes(nearbyToolName)) {
+        return;
+      }
+
       optionsToUse.defaultPointsPosition = [];
       // if (optionsToUse.nearbyToolData) {
       //   optionsToUse.defaultPointsPosition = commandsManager.runCommand(

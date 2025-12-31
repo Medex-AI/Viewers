@@ -111,6 +111,23 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    id: 'ManualContour',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'tool-freehand-line-thin',
+      label: 'Manual Contour',
+      tooltip: 'Manual contour segmentation tool',
+      commands: {
+        ...setToolActiveToolbar,
+        commandOptions: {
+          ...setToolActiveToolbar.commandOptions,
+          toolName: 'ManualContour',
+        },
+      },
+      evaluate: 'evaluate.cornerstoneTool',
+    },
+  },
+  {
     id: 'CircleROI',
     uiType: 'ohif.toolButton',
     props: {

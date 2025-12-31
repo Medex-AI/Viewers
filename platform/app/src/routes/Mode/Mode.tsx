@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useLocation, useNavigate } from 'react-router';
+import { Link, useParams, useLocation, useNavigate } from 'react-router-dom';
 import PropTypes from 'prop-types';
 import { utils } from '@ohif/core';
 import { ImageViewerProvider, DragAndDropProvider } from '@ohif/ui-next';
@@ -44,6 +44,7 @@ export default function ModeRoute({
   const lowerCaseSearchParams = useSearchParams({ lowerCaseKeys: true });
 
   const [studyInstanceUIDs, setStudyInstanceUIDs] = useState(null);
+  const [hasMissingStudyUIDs, setHasMissingStudyUIDs] = useState(false);
 
   const [refresh, setRefresh] = useState(false);
   const [ExtensionDependenciesLoaded, setExtensionDependenciesLoaded] = useState(false);
@@ -125,7 +126,17 @@ export default function ModeRoute({
         params,
         query,
       });
-      setStudyInstanceUIDs(dataSource.getStudyInstanceUIDs({ params, query }));
+      const resolvedStudyInstanceUIDs =
+        dataSource.getStudyInstanceUIDs({ params, query }) || [];
+
+      if (!resolvedStudyInstanceUIDs.length) {
+        setHasMissingStudyUIDs(true);
+        setStudyInstanceUIDs([]);
+        return;
+      }
+
+      setHasMissingStudyUIDs(false);
+      setStudyInstanceUIDs(resolvedStudyInstanceUIDs);
     };
 
     initializeDataSource(params, query);
@@ -330,7 +341,29 @@ export default function ModeRoute({
     refresh,
   ]);
 
-  if (!studyInstanceUIDs || !layoutTemplateData.current || !ExtensionDependenciesLoaded) {
+  if (!ExtensionDependenciesLoaded || !studyInstanceUIDs) {
+    return null;
+  }
+
+  if (hasMissingStudyUIDs) {
+    return (
+      <div className="absolute flex h-full w-full items-center justify-center text-white">
+        <div>
+          <h4>No StudyInstanceUIDs were provided for this route.</h4>
+          {appConfig.showStudyList ? (
+            <Link
+              className="text-primary-light"
+              to={'/'}
+            >
+              Return to study list
+            </Link>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  if (!layoutTemplateData.current) {
     return null;
   }
 

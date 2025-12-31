@@ -8,6 +8,24 @@ import { Button } from '../Button/Button';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+const shouldAllowErrorDetails = () => {
+  if (!isProduction) {
+    return true;
+  }
+
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const isLocalhost =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const params = new URLSearchParams(window.location.search);
+  const hasDebugFlag = params.has('errorDetails') || params.has('showErrorDetails');
+  const configAllows = Boolean((window as any).config?.showErrorDetails);
+
+  return isLocalhost || hasDebugFlag || configAllows;
+};
+
 /**
  * Parses an error stack trace to extract important information
  * Extracts the first function name from the stack trace
@@ -135,7 +153,10 @@ const DefaultFallback = ({
 }: DefaultFallbackProps) => {
   const { t } = useTranslation('ErrorBoundary');
   const [showDetails, setShowDetails] = useState(false);
-  const title = `${t('Something went wrong')}${!isProduction && ` ${t('in')} ${context}`}.`;
+  const allowErrorDetails = shouldAllowErrorDetails();
+  const title = `${t('Something went wrong')}${
+    allowErrorDetails ? ` ${t('in')} ${context}` : ''
+  }.`;
   const subtitle = t('Sorry, something went wrong there. Try again.');
 
   const { errorTitle, code, firstFilename } = parseErrorStack(error);
@@ -158,7 +179,7 @@ const DefaultFallback = ({
     });
   }, [error, subtitle, t, title]);
 
-  if (isProduction) {
+  if (!allowErrorDetails) {
     return null;
   }
 
@@ -250,7 +271,9 @@ const ErrorBoundary = ({
     let errorTimeout: NodeJS.Timeout;
 
     const handleError = (event: ErrorEvent) => {
-      event.preventDefault();
+      if (!shouldAllowErrorDetails()) {
+        event.preventDefault();
+      }
       clearTimeout(errorTimeout);
       errorTimeout = setTimeout(() => {
         setError(event.error);
@@ -259,7 +282,9 @@ const ErrorBoundary = ({
     };
 
     const handleRejection = (event: PromiseRejectionEvent) => {
-      event.preventDefault();
+      if (!shouldAllowErrorDetails()) {
+        event.preventDefault();
+      }
       clearTimeout(errorTimeout);
       errorTimeout = setTimeout(() => {
         setError(event.reason);

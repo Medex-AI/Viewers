@@ -28,13 +28,13 @@ class RotatableRectangleROITool extends RectangleROITool {
     this.configuration.calculateStats = false;
     this.configuration.getTextLines = data => this._getRoiInfoTextLines(data);
 
-    const baseAddNewAnnotation = this.addNewAnnotation;
-    const baseRenderAnnotation = this.renderAnnotation;
-    const baseDragCallback = this._dragCallback;
-    const baseEndCallback = this._endCallback;
-    const baseToolSelectedCallback = this.toolSelectedCallback;
-    const baseHandleSelectedCallback = this.handleSelectedCallback;
-    const baseMouseMoveCallback = this.mouseMoveCallback;
+    const baseAddNewAnnotation = this.addNewAnnotation.bind(this);
+    const baseRenderAnnotation = this.renderAnnotation.bind(this);
+    const baseDragCallback = this._dragCallback.bind(this);
+    const baseEndCallback = this._endCallback.bind(this);
+    const baseToolSelectedCallback = this.toolSelectedCallback.bind(this);
+    const baseHandleSelectedCallback = this.handleSelectedCallback.bind(this);
+    const baseMouseMoveCallback = this.mouseMoveCallback.bind(this);
     const baseIsPointNearTool = this.isPointNearTool?.bind(this);
 
     cursors.registerCursor(
@@ -66,11 +66,6 @@ class RotatableRectangleROITool extends RectangleROITool {
         if (enabledElement?.viewport) {
           this._ensureRotationHandle(newAnnotation, enabledElement.viewport);
         }
-
-        const cursor = cursors.MouseCursor.getDefinedCursor('crosshair');
-        if (cursor) {
-          cursors.elementCursor.setElementCursor(element, cursor);
-        }
       }
 
       return newAnnotation;
@@ -78,16 +73,6 @@ class RotatableRectangleROITool extends RectangleROITool {
 
     this.toolSelectedCallback = (evt, selectedAnnotation) => {
       baseToolSelectedCallback(evt, selectedAnnotation);
-
-      const element = evt.detail?.element;
-      if (!element) {
-        return;
-      }
-
-      const cursor = cursors.MouseCursor.getDefinedCursor('crosshair');
-      if (cursor) {
-        cursors.elementCursor.setElementCursor(element, cursor);
-      }
     };
 
     this.handleSelectedCallback = (evt, selectedAnnotation, handle) => {
@@ -133,18 +118,36 @@ class RotatableRectangleROITool extends RectangleROITool {
         return false;
       }
 
-      return this._isPointInsideAnnotation(annotationToTest, enabledElement.viewport, canvasCoords);
+      return this._isPointNearAnnotationEdge(
+        annotationToTest,
+        enabledElement.viewport,
+        canvasCoords,
+        proximity
+      );
     };
 
     this.mouseMoveCallback = (evt, filteredAnnotations) => {
-      const needsRedraw = baseMouseMoveCallback(evt, filteredAnnotations);
+      const { element, currentPoints } = evt.detail;
 
-      if (!filteredAnnotations?.length) {
-        return needsRedraw;
+      // Only set cursor if this tool is active
+      const isToolActive = this.mode === 'Active';
+
+      if (!filteredAnnotations?.length || !element) {
+        // Set crosshair cursor for annotation tool when there are no annotations (only if tool is active)
+        if (element && isToolActive) {
+          const crosshairCursor = cursors.MouseCursor.getDefinedCursor('crosshair');
+          if (crosshairCursor) {
+            cursors.elementCursor.setElementCursor(element, crosshairCursor);
+          }
+        }
+        return baseMouseMoveCallback(evt, filteredAnnotations);
       }
 
-      const { element, currentPoints } = evt.detail;
-      const canvasCoords = currentPoints.canvas;
+      const canvasCoords = currentPoints?.canvas;
+      if (!canvasCoords) {
+        return baseMouseMoveCallback(evt, filteredAnnotations);
+      }
+
       const enabledElement = getEnabledElement(element);
       const { viewport } = enabledElement;
 
@@ -169,7 +172,7 @@ class RotatableRectangleROITool extends RectangleROITool {
           if (handleIndex === ROTATION_HANDLE_INDEX) {
             cursorName = ROTATION_CURSOR_NAME;
           } else if (handleIndex === -1) {
-            cursorName = 'move';
+            cursorName = 'grab';
           } else if (handleIndex !== null && handleIndex !== undefined) {
             cursorName = this._getResizeCursorForHandle(
               currentAnnotation,
@@ -180,25 +183,31 @@ class RotatableRectangleROITool extends RectangleROITool {
           break;
         }
 
+        const nearEdge = this._isPointNearAnnotationEdge(
+          currentAnnotation,
+          viewport,
+          canvasCoords,
+          HANDLE_PROXIMITY
+        );
+
+        if (nearEdge) {
+          cursorName = 'grab';
+          break;
+        }
+
         const insideTool = this._isPointInsideAnnotation(
           currentAnnotation,
           viewport,
           canvasCoords
         );
-        const nearTool = this.isPointNearTool(
-          element,
-          currentAnnotation,
-          canvasCoords,
-          HANDLE_PROXIMITY,
-          'mouse'
-        );
 
-        if (insideTool || nearTool) {
-          cursorName = 'move';
+        if (insideTool) {
+          cursorName = 'crosshair';
           break;
         }
       }
 
+      // Set cursor based on what was detected
       if (cursorName === ROTATION_CURSOR_NAME) {
         const rotationCursor = cursors.SVGMouseCursor.getDefinedCursor(
           ROTATION_CURSOR_NAME,
@@ -206,14 +215,20 @@ class RotatableRectangleROITool extends RectangleROITool {
           ROTATION_CURSOR_COLOR
         );
         cursors.elementCursor.setElementCursor(element, rotationCursor);
-      } else {
-        const cursor = cursors.MouseCursor.getDefinedCursor(cursorName || 'crosshair');
+      } else if (cursorName) {
+        const cursor = cursors.MouseCursor.getDefinedCursor(cursorName);
         if (cursor) {
           cursors.elementCursor.setElementCursor(element, cursor);
         }
+      } else if (isToolActive) {
+        // Set crosshair cursor for annotation tool when not over any handle or annotation (only if tool is active)
+        const crosshairCursor = cursors.MouseCursor.getDefinedCursor('crosshair');
+        if (crosshairCursor) {
+          cursors.elementCursor.setElementCursor(element, crosshairCursor);
+        }
       }
 
-      return needsRedraw;
+      return baseMouseMoveCallback(evt, filteredAnnotations);
     };
 
     this._dragCallback = evt => {
@@ -298,7 +313,7 @@ class RotatableRectangleROITool extends RectangleROITool {
       if (!element) {
         return;
       }
-      const cursor = cursors.MouseCursor.getDefinedCursor('auto');
+      const cursor = cursors.MouseCursor.getDefinedCursor('crosshair');
       if (cursor) {
         cursors.elementCursor.setElementCursor(element, cursor);
       }
@@ -647,6 +662,55 @@ class RotatableRectangleROITool extends RectangleROITool {
     ];
 
     return this._isPointInsideConvexPolygon(canvasPoint, canvasPoints);
+  }
+
+  _isPointNearAnnotationEdge(annotation, viewport, canvasPoint, proximity) {
+    const points = annotation.data?.handles?.points;
+    if (!points || points.length < 4) {
+      return false;
+    }
+
+    const canvasPoints = [
+      viewport.worldToCanvas(points[0]),
+      viewport.worldToCanvas(points[1]),
+      viewport.worldToCanvas(points[3]),
+      viewport.worldToCanvas(points[2]),
+    ];
+
+    let minDistance = Infinity;
+    for (let i = 0; i < canvasPoints.length; i++) {
+      const a = canvasPoints[i];
+      const b = canvasPoints[(i + 1) % canvasPoints.length];
+      const distance = this._distancePointToSegment(canvasPoint, a, b);
+      if (distance < minDistance) {
+        minDistance = distance;
+      }
+    }
+
+    return minDistance <= proximity;
+  }
+
+  _distancePointToSegment(point, a, b) {
+    const abx = b[0] - a[0];
+    const aby = b[1] - a[1];
+    const apx = point[0] - a[0];
+    const apy = point[1] - a[1];
+    const abLenSq = abx * abx + aby * aby;
+
+    if (!abLenSq) {
+      return Math.hypot(apx, apy);
+    }
+
+    let t = (apx * abx + apy * aby) / abLenSq;
+    if (t < 0) {
+      t = 0;
+    } else if (t > 1) {
+      t = 1;
+    }
+
+    const closestX = a[0] + abx * t;
+    const closestY = a[1] + aby * t;
+    return Math.hypot(point[0] - closestX, point[1] - closestY);
   }
 
   _isPointInsideConvexPolygon(point, polygon) {
