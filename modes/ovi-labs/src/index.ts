@@ -3,7 +3,9 @@ import toolbarButtons from './toolbarButtons';
 import initToolGroups from './initToolGroups';
 import { isSuitableForOviLabs } from './utils/seriesValidator';
 import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleROIBehavior';
-import setupManualContourBehavior from './utils/setupManualContourBehavior';
+import setupManualContourBehavior, {
+  showManualContourLabelMenu,
+} from './utils/setupManualContourBehavior';
 import setupManipulationToolsCursor from './utils/setupManipulationToolsCursor';
 import viewportClickCommandsCustomization from './customizations/viewportClickCommandsCustomization';
 import './styles.css';
@@ -32,6 +34,29 @@ const extensionDependencies = {
   '@ohif/extension-ovi-labs': '3.11.0-beta.11',
   '@ohif/extension-dicom-video': '3.11.0-beta.11',
 };
+
+const OVI_LABS_COMMANDS_CONTEXT = 'OVI_LABS';
+const MANUAL_CONTOUR_TOOL_NAME = 'ManualContour';
+
+function registerOviLabsCommands(commandsManager, servicesManager) {
+  commandsManager.createContext(OVI_LABS_COMMANDS_CONTEXT);
+
+  commandsManager.registerCommand(OVI_LABS_COMMANDS_CONTEXT, 'showManualContourLabelMenu', {
+    commandFn: ({ nearbyToolData, event }) => {
+      if (event?.detail?.event?.defaultPrevented) {
+        return;
+      }
+
+      if (nearbyToolData?.metadata?.toolName !== MANUAL_CONTOUR_TOOL_NAME) {
+        return;
+      }
+
+      const { uiDialogService } = servicesManager.services;
+      const element = event?.detail?.element;
+      showManualContourLabelMenu({ uiDialogService, annotation: nearbyToolData, element });
+    },
+  });
+}
 
 function resolveDisplaySetsFromStudy(study) {
   if (Array.isArray(study?.displaySets)) {
@@ -108,6 +133,7 @@ function modeFactory({ modeConfiguration }) {
   let teardownRotatableRectangleROIBehavior;
   let teardownManualContourBehavior;
   let teardownManipulationToolsCursor;
+  let commandsManagerRef;
 
   return {
     id,
@@ -119,6 +145,9 @@ function modeFactory({ modeConfiguration }) {
 
       uiDialogService?.hideAll?.();
       uiModalService?.hide?.();
+
+      commandsManagerRef = commandsManager;
+      registerOviLabsCommands(commandsManager, servicesManager);
 
       // Set custom viewport click commands to disable context menu for ManualContour and RotatableRectangleROI
       customizationService?.addModeCustomizations?.([
@@ -171,6 +200,8 @@ function modeFactory({ modeConfiguration }) {
       uiDialogService.hideAll();
       uiModalService.hide();
       toolGroupService.destroy();
+      commandsManagerRef?.clearContext?.(OVI_LABS_COMMANDS_CONTEXT);
+      commandsManagerRef = undefined;
       teardownRotatableRectangleROIBehavior?.();
       teardownRotatableRectangleROIBehavior = undefined;
       teardownManualContourBehavior?.();

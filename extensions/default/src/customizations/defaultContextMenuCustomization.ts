@@ -6,7 +6,9 @@ export default {
       {
         id: 'forExistingMeasurement',
         selector: ({ nearbyToolData }) =>
-          !!nearbyToolData && nearbyToolData?.metadata?.toolName !== 'RotatableRectangleROI',
+          !!nearbyToolData &&
+          nearbyToolData?.metadata?.toolName !== 'RotatableRectangleROI' &&
+          nearbyToolData?.metadata?.toolName !== 'ManualContour',
         items: [
           {
             label: 'Delete measurement',

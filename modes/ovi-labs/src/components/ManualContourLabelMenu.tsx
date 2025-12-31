@@ -1,4 +1,5 @@
 import React from 'react';
+import { DialogTitle } from '@ohif/ui-next';
 
 type ManualContourLabelMenuProps = {
   labelData: { label: string; value: string }[];
@@ -29,6 +30,7 @@ const ManualContourLabelMenu: React.FC<ManualContourLabelMenuProps> = ({
 
   return (
     <div className="w-48 overflow-hidden rounded-md border border-input bg-popover p-1 text-popover-foreground shadow-md">
+      <DialogTitle className="sr-only">Manual contour label</DialogTitle>
       {labelData.map(item => {
         const color = SEGMENTATION_COLORS[item.value] || '#FFFFFF';
         const isSelected = item.value === initialLabel;

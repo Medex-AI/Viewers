@@ -1,4 +1,4 @@
-import { getEnabledElement, eventTarget } from '@cornerstonejs/core';
+import { getEnabledElement, eventTarget, EVENTS, getEnabledElements } from '@cornerstonejs/core';
 import type { Types } from '@cornerstonejs/core';
 import {
   PlanarFreehandROITool,
@@ -52,6 +52,9 @@ class ManualContourTool extends PlanarFreehandROITool {
   _activateContourMove: (element: HTMLElement) => void;
   _deactivateContourMove: (element: HTMLElement) => void;
   _rightClickCallback: (evt: any) => void;
+  _rightClickElementListeners: Map<HTMLElement, (evt: MouseEvent) => void>;
+  _elementEnabledHandler: (evt: any) => void;
+  _elementDisabledHandler: (evt: any) => void;
 
   constructor(toolProps = {}) {
     const initialProps = {
@@ -73,6 +76,7 @@ class ManualContourTool extends PlanarFreehandROITool {
 
     registerPencilCursor();
 
+    this._rightClickElementListeners = new Map();
     const baseMouseMoveCallback = this.mouseMoveCallback.bind(this);
     const baseRenderAnnotation = this.renderAnnotation.bind(this);
     const baseToolSelectedCallback = this.toolSelectedCallback.bind(this);
@@ -226,15 +230,29 @@ class ManualContourTool extends PlanarFreehandROITool {
       element.removeEventListener(Enums.Events.TOUCH_TAP, this._endContourMoveCallback);
     };
 
+    const getCanvasPointFromMouseEvent = (event: MouseEvent, element: HTMLElement) => {
+      const rect = element.getBoundingClientRect();
+      return [
+        event.pageX - rect.left - window.pageXOffset,
+        event.pageY - rect.top - window.pageYOffset,
+      ] as Types.Point2;
+    };
+
     this._rightClickCallback = evt => {
+      const event = evt?.detail?.event ?? evt;
+      const element = evt?.detail?.element ?? event?.currentTarget;
+      const currentPoints = evt?.detail?.currentPoints;
+      const canvasCoords =
+        currentPoints?.canvas && Array.isArray(currentPoints.canvas)
+          ? currentPoints.canvas
+          : element && event
+            ? getCanvasPointFromMouseEvent(event, element as HTMLElement)
+            : null;
+
       // Check if it's a right-click (button 2)
-      if (evt.detail?.event?.button !== 2) {
+      if (!event || event.button !== 2) {
         return;
       }
-
-      const eventDetail = evt.detail;
-      const { element, currentPoints } = eventDetail || {};
-      const canvasCoords = currentPoints?.canvas;
 
       if (!element || !canvasCoords) {
         return;
@@ -261,7 +279,7 @@ class ManualContourTool extends PlanarFreehandROITool {
         // Check if clicking on a handle (to remove it)
         const handleHit = findNearestHandle(contourPoints, canvasCoords, viewport, HANDLE_PROXIMITY);
         if (handleHit !== null && contourPoints.length > 3) {
-          evt.preventDefault();
+          event.preventDefault();
           this.createMemo(element, currentAnnotation as any);
           contourPoints.splice(handleHit, 1);
           currentAnnotation.data.handles.points = contourPoints;
@@ -284,7 +302,7 @@ class ManualContourTool extends PlanarFreehandROITool {
         const isClosed = currentAnnotation.data?.contour?.closed || false;
         const edgeHit = findNearestEdge(contourPoints, canvasCoords, viewport, HANDLE_PROXIMITY, isClosed);
         if (edgeHit !== null) {
-          evt.preventDefault();
+          event.preventDefault();
           this.createMemo(element, currentAnnotation as any);
 
           const worldPoint = viewport.canvasToWorld(canvasCoords);
@@ -636,11 +654,57 @@ class ManualContourTool extends PlanarFreehandROITool {
     };
   }
 
-  onSetToolActive() {
-    // Enable right-click context menu for adding/removing points
-    if (typeof document !== 'undefined') {
-      document.addEventListener(Enums.Events.MOUSE_DOWN, this._rightClickCallback);
+  private _attachRightClickListener(element: HTMLElement) {
+    if (!element || this._rightClickElementListeners.has(element)) {
+      return;
     }
+
+    const handler = (evt: MouseEvent) => this._rightClickCallback(evt);
+    element.addEventListener('mousedown', handler, true);
+    this._rightClickElementListeners.set(element, handler);
+  }
+
+  private _detachRightClickListener(element: HTMLElement) {
+    const handler = this._rightClickElementListeners.get(element);
+    if (!handler) {
+      return;
+    }
+
+    element.removeEventListener('mousedown', handler, true);
+    this._rightClickElementListeners.delete(element);
+  }
+
+  private _attachRightClickListeners() {
+    getEnabledElements().forEach(enabledElement => {
+      const element = enabledElement?.viewport?.element;
+      if (element) {
+        this._attachRightClickListener(element);
+      }
+    });
+  }
+
+  private _detachRightClickListeners() {
+    Array.from(this._rightClickElementListeners.keys()).forEach(element =>
+      this._detachRightClickListener(element)
+    );
+  }
+
+  onSetToolActive() {
+    this._attachRightClickListeners();
+    this._elementEnabledHandler = evt => {
+      const { element } = evt.detail || {};
+      if (element) {
+        this._attachRightClickListener(element);
+      }
+    };
+    this._elementDisabledHandler = evt => {
+      const { element } = evt.detail || {};
+      if (element) {
+        this._detachRightClickListener(element);
+      }
+    };
+    eventTarget.addEventListener(EVENTS.ELEMENT_ENABLED, this._elementEnabledHandler);
+    eventTarget.addEventListener(EVENTS.ELEMENT_DISABLED, this._elementDisabledHandler);
 
     // Listen for annotation completed to resample newly drawn contours
     eventTarget.addEventListener(
@@ -650,8 +714,12 @@ class ManualContourTool extends PlanarFreehandROITool {
   }
 
   onSetToolPassive() {
-    if (typeof document !== 'undefined') {
-      document.removeEventListener(Enums.Events.MOUSE_DOWN, this._rightClickCallback);
+    this._detachRightClickListeners();
+    if (this._elementEnabledHandler) {
+      eventTarget.removeEventListener(EVENTS.ELEMENT_ENABLED, this._elementEnabledHandler);
+    }
+    if (this._elementDisabledHandler) {
+      eventTarget.removeEventListener(EVENTS.ELEMENT_DISABLED, this._elementDisabledHandler);
     }
     eventTarget.removeEventListener(
       Enums.Events.ANNOTATION_COMPLETED,
@@ -660,8 +728,12 @@ class ManualContourTool extends PlanarFreehandROITool {
   }
 
   onSetToolDisabled() {
-    if (typeof document !== 'undefined') {
-      document.removeEventListener(Enums.Events.MOUSE_DOWN, this._rightClickCallback);
+    this._detachRightClickListeners();
+    if (this._elementEnabledHandler) {
+      eventTarget.removeEventListener(EVENTS.ELEMENT_ENABLED, this._elementEnabledHandler);
+    }
+    if (this._elementDisabledHandler) {
+      eventTarget.removeEventListener(EVENTS.ELEMENT_DISABLED, this._elementDisabledHandler);
     }
     eventTarget.removeEventListener(
       Enums.Events.ANNOTATION_COMPLETED,
@@ -709,8 +781,8 @@ export default ManualContourTool;
 const HANDLE_PROXIMITY = 6; // Handle selection range in pixels
 const TARGET_POINT_SPACING = 5.0; // Target spacing between control points in world units (mm)
 const MIN_CONTROL_POINTS = 4;
-const SOFT_DRAG_RADIUS = 0; // Number of neighboring points affected during drag
-const SOFT_DRAG_DECAY = 0.6; // Exponential decay factor for neighbor influence
+const SOFT_DRAG_RADIUS = 3; // Number of neighboring points affected during drag
+const SOFT_DRAG_DECAY = 0.8; // Exponential decay factor for neighbor influence
 const PENCIL_CURSOR_NAME = 'ManualContour.Pencil';
 let isPencilCursorRegistered = false;
 

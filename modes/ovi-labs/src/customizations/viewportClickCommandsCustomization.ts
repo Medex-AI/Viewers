@@ -9,7 +9,7 @@ export default {
           requireNearbyToolData: true,
           menuId: 'measurementsContextMenu',
           disallowedToolNames: ['ManualContour'],
-          // Only allow context menu for specific tools (exclude ManualContour and RotatableRectangleROI)
+          // Only allow context menu for specific tools (ManualContour uses its own label menu)
           allowedSelectedTools: [
             'Length',
             'Bidirectional',

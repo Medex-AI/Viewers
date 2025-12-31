@@ -79,7 +79,58 @@ const applyAnnotationStyle = (annotationUID, labelId) => {
   });
 };
 
-const promptForLabel = uiDialogService => {
+const updateActiveLabel = labelId => {
+  activeLabelId = labelId;
+  applyToolGroupStyle(activeLabelId);
+};
+
+const updateAnnotationLabel = (annotationToUpdate, labelId, element) => {
+  if (!annotationToUpdate?.data) {
+    return;
+  }
+
+  const labelConfig = getLabelConfig(labelId);
+  annotationToUpdate.data = {
+    ...annotationToUpdate.data,
+    labelId,
+    labelName: labelConfig.label,
+    labelColor: labelConfig.color,
+    modifiedAt: Date.now(),
+  };
+
+  applyAnnotationStyle(annotationToUpdate.annotationUID, labelId);
+  annotation.state.triggerAnnotationModified(
+    annotationToUpdate,
+    element,
+    Enums.ChangeTypes.LabelChange
+  );
+
+  const frameOfReferenceUID = annotationToUpdate.metadata?.FrameOfReferenceUID;
+  const annotationManager = annotation.state.getAnnotationManager();
+
+  if (!frameOfReferenceUID || !annotationManager) {
+    return;
+  }
+
+  const existingAnnotations =
+    annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
+
+  existingAnnotations.forEach(existingAnnotation => {
+    if (
+      existingAnnotation.annotationUID !== annotationToUpdate.annotationUID &&
+      existingAnnotation.data?.labelId === labelId
+    ) {
+      annotation.state.removeAnnotation(existingAnnotation.annotationUID);
+    }
+  });
+};
+
+export const showManualContourLabelMenu = ({
+  uiDialogService,
+  annotation: targetAnnotation,
+  element,
+  defaultPosition: positionOverride,
+}) => {
   if (!uiDialogService) {
     return;
   }
@@ -87,7 +138,8 @@ const promptForLabel = uiDialogService => {
   const panelWidth = 240;
   const margin = 16;
   const defaultPosition =
-    typeof window !== 'undefined'
+    positionOverride ||
+    (typeof window !== 'undefined'
       ? (() => {
           const toolButton = window.document?.querySelector(`[data-tool="${TOOL_NAME}"]`);
           if (toolButton instanceof HTMLElement) {
@@ -105,7 +157,7 @@ const promptForLabel = uiDialogService => {
             y: 96,
           };
         })()
-      : undefined;
+      : undefined);
 
   uiDialogService.hide('manual-contour-label');
   uiDialogService.show({
@@ -120,13 +172,15 @@ const promptForLabel = uiDialogService => {
     defaultPosition,
     contentProps: {
       labelData: LABELS.map(item => ({ label: item.label, value: item.id })),
-      initialLabel: activeLabelId,
+      initialLabel: targetAnnotation?.data?.labelId || activeLabelId,
       onSelect: value => {
         if (!value) {
           return;
         }
-        activeLabelId = value;
-        applyToolGroupStyle(activeLabelId);
+        updateActiveLabel(value);
+        if (targetAnnotation) {
+          updateAnnotationLabel(targetAnnotation, value, element);
+        }
       },
     },
   });
@@ -137,10 +191,11 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
 
   applyToolGroupStyle(activeLabelId);
 
+
   const onToolActivated = evt => {
     const { toolGroupId, toolName } = evt.detail || {};
     if (toolGroupId === TOOL_GROUP_ID && toolName === TOOL_NAME) {
-      promptForLabel(uiDialogService);
+      showManualContourLabelMenu({ uiDialogService });
       // Update button color when tool is activated
       setTimeout(() => {
         const { color } = getLabelConfig(activeLabelId);
