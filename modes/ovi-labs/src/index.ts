@@ -26,6 +26,7 @@ const dicomVideo = {
 
 const oviLabsPanels = {
   analysisContainer: '@ohif/extension-ovi-labs.panelModule.analysisContainer',
+  segmentation: '@ohif/extension-ovi-labs.panelModule.segmentation',
 };
 
 const extensionDependencies = {
@@ -237,7 +238,7 @@ function modeFactory({ modeConfiguration }) {
             props: {
               leftPanels: [ohif.leftPanel],
               leftPanelResizable: true,
-              rightPanels: [oviLabsPanels.analysisContainer],
+              rightPanels: [oviLabsPanels.analysisContainer, oviLabsPanels.segmentation],
               rightPanelResizable: true,
               viewports: [
                 {

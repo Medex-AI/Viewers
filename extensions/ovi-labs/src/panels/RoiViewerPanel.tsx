@@ -10,6 +10,16 @@ import {
   getKymographSettings,
   subscribeKymographSettings,
 } from '../utils/kymographSettingsStore';
+import {
+  getSegmentationState,
+  setActiveModel,
+  setLabelVisibility,
+  subscribeSegmentationState,
+  ModelType,
+  SegmentationLabel,
+  syncLabelsFromAnnotations,
+} from '../utils/segmentationStore';
+import { setRoiSegmentationFrame } from '../utils/roiSegmentationStore';
 
 interface RoiViewerPanelProps {
   commandsManager?: any;
@@ -29,6 +39,36 @@ const SEGMENTATION_LABELS = [
   { id: 'myometrium', label: 'Myometrium', color: '#FBBF24' },
   { id: 'cervixCavity', label: 'Cervix cavity', color: '#60A5FA' },
 ];
+
+const MANUAL_CONTOUR_TOOL = 'ManualContour';
+
+const hexToRgb = (hex: string): [number, number, number] => {
+  const normalized = hex.replace('#', '');
+  if (normalized.length !== 6) {
+    return [255, 255, 255];
+  }
+  const intValue = parseInt(normalized, 16);
+  return [(intValue >> 16) & 255, (intValue >> 8) & 255, intValue & 255];
+};
+
+const isPointInPolygon = (point: [number, number], polygon: number[][]): boolean => {
+  const [x, y] = point;
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+
+    const intersect =
+      yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+};
 /**
  * ROI Viewer Panel - Placeholder
  *
@@ -51,16 +91,99 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     total: null,
   });
   const [showSpacingWarning, setShowSpacingWarning] = useState(false);
-  const [segmentationSelections] = useState<Record<string, boolean>>({
-    uterineCavity: false,
-    endometrium: false,
-    myometrium: false,
-    cervix: false,
-  });
-  const [segmentationModel, setSegmentationModel] = useState('medsam');
+  const [segmentationModel, setSegmentationModelLocal] = useState<ModelType>(
+    getSegmentationState().activeModel
+  );
+  const [segmentationLabels, setSegmentationLabels] = useState<SegmentationLabel[]>(
+    getSegmentationState().labels
+  );
   const [kymographSettings, setKymographSettings] = useState(getKymographSettings());
   const [{ activeViewportId }] = useViewportGrid();
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
+  const displaySetService = servicesManager?.services?.displaySetService;
+  const viewportGridService = servicesManager?.services?.viewportGridService;
+
+  useEffect(() => {
+    const annotationManager = annotation.state.getAnnotationManager();
+    const debounceRef = { current: null as NodeJS.Timeout | null };
+
+    const updateLabels = () => {
+      if (!annotationManager || !activeViewportId || !cornerstoneViewportService) {
+        return;
+      }
+
+      const viewportInfo = cornerstoneViewportService.getViewportInfo?.(activeViewportId);
+      const element = viewportInfo?.element;
+      let contours: any[] = [];
+
+      if (element) {
+        contours =
+          annotation.state.getAnnotations('ManualContour', element as HTMLElement) || [];
+      } else {
+        const frames = annotationManager.getFramesOfReference() || [];
+        frames.forEach(frame => {
+          const annotationsForFrame =
+            annotationManager.getAnnotations(frame, 'ManualContour') || [];
+          contours.push(...annotationsForFrame);
+        });
+      }
+
+      if (displaySetService && viewportInfo?.getDisplaySetOptions) {
+        const displaySetOptions = viewportInfo.getDisplaySetOptions?.();
+        const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
+        const displaySet = displaySetInstanceUID
+          ? displaySetService.getDisplaySetByUID(displaySetInstanceUID)
+          : undefined;
+        const seriesInstanceUID = displaySet?.SeriesInstanceUID;
+
+        if (seriesInstanceUID) {
+          contours = contours.filter(contour => contour?.data?.seriesInstanceUID === seriesInstanceUID);
+        }
+      }
+
+      syncLabelsFromAnnotations(contours);
+    };
+
+    const debouncedUpdate = () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+      debounceRef.current = setTimeout(updateLabels, 50);
+    };
+
+    const addedEvt = toolEnums.Events.ANNOTATION_ADDED;
+    const modifiedEvt = toolEnums.Events.ANNOTATION_MODIFIED;
+    const removedEvt = toolEnums.Events.ANNOTATION_REMOVED;
+
+    eventTarget.addEventListener(addedEvt, debouncedUpdate);
+    eventTarget.addEventListener(modifiedEvt, debouncedUpdate);
+    eventTarget.addEventListener(removedEvt, debouncedUpdate);
+
+    const subscriptions = [];
+    if (viewportGridService?.subscribe) {
+      subscriptions.push(
+        viewportGridService.subscribe(
+          viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,
+          debouncedUpdate
+        )
+      );
+      subscriptions.push(
+        viewportGridService.subscribe(viewportGridService.EVENTS.GRID_STATE_CHANGED, debouncedUpdate)
+      );
+    }
+
+    updateLabels();
+
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+      eventTarget.removeEventListener(addedEvt, debouncedUpdate);
+      eventTarget.removeEventListener(modifiedEvt, debouncedUpdate);
+      eventTarget.removeEventListener(removedEvt, debouncedUpdate);
+      subscriptions.forEach(subscription => subscription.unsubscribe());
+    };
+  }, [activeViewportId, cornerstoneViewportService, displaySetService, viewportGridService]);
 
   useEffect(() => {
     const unsubscribe = subscribeKymographSettings(settings => {
@@ -68,6 +191,19 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     });
     return unsubscribe;
   }, []);
+
+  // Subscribe to segmentation store for model/visibility sync
+  useEffect(() => {
+    const unsubscribe = subscribeSegmentationState(state => {
+      setSegmentationModelLocal(state.activeModel);
+      setSegmentationLabels(state.labels);
+    });
+    return unsubscribe;
+  }, []);
+
+  const handleSegmentationModelChange = (model: string) => {
+    setActiveModel(model as ModelType);
+  };
 
   const buildRoiAnalysisData = useCallback(() => {
     if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
@@ -462,6 +598,191 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const startX = (PREVIEW_WIDTH - roiWidth) / 2;
     const startY = (PREVIEW_HEIGHT - roiHeight) / 2;
 
+    const labelStateMap = new Map(
+      segmentationLabels.map(label => [label.id, label])
+    );
+    const labelIdToIndex = new Map<string, number>();
+    const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> = {};
+    SEGMENTATION_LABELS.forEach((label, index) => {
+      const labelIndex = index + 1;
+      labelIdToIndex.set(label.id, labelIndex);
+      labelMap[labelIndex] = {
+        labelId: label.id,
+        labelName: label.label,
+        labelColor: label.color,
+      };
+    });
+
+    const currentFrameNumber =
+      typeof currentIndex === 'number' ? currentIndex + 1 : undefined;
+    const contourAnnotations =
+      annotation.state.getAnnotations(MANUAL_CONTOUR_TOOL, element as HTMLElement) || [];
+    const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
+    const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
+    const displaySet = displaySetInstanceUID
+      ? displaySetService?.getDisplaySetByUID?.(displaySetInstanceUID)
+      : undefined;
+    const seriesInstanceUID = displaySet?.SeriesInstanceUID;
+
+    const filteredContours = contourAnnotations.filter(contour => {
+      if (seriesInstanceUID && contour?.data?.seriesInstanceUID) {
+        if (contour.data.seriesInstanceUID !== seriesInstanceUID) {
+          return false;
+        }
+      }
+
+      if (imageId && contour?.metadata?.referencedImageId) {
+        return contour.metadata.referencedImageId === imageId;
+      }
+
+      const frameNumber = contour?.data?.frameNumber || contour?.metadata?.frameNumber;
+      if (currentFrameNumber && frameNumber) {
+        return frameNumber === currentFrameNumber;
+      }
+
+      return false;
+    });
+
+    const roiMaskWidth = Math.max(1, Math.round(roiWidth));
+    const roiMaskHeight = Math.max(1, Math.round(roiHeight));
+    const roiScaleX = roiMaskWidth / roiWidth;
+    const roiScaleY = roiMaskHeight / roiHeight;
+    const maskData = new Uint8Array(roiMaskWidth * roiMaskHeight);
+    const overlayImageData = ctx.createImageData(roiMaskWidth, roiMaskHeight);
+
+    const cosAngle = Math.cos(-angle);
+    const sinAngle = Math.sin(-angle);
+    const needsNormalization =
+      (scaleX > 1.01 || scaleY > 1.01) &&
+      (elementWidth > 0 && elementHeight > 0);
+
+    const normalizeCanvasPoint = (worldPoint: number[]) => {
+      const canvasPoint = viewport.worldToCanvas(worldPoint);
+      if (!needsNormalization) {
+        return canvasPoint;
+      }
+      return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
+    };
+
+    const toPreviewPoint = (canvasPoint: number[]) => {
+      const dx = canvasPoint[0] - center[0];
+      const dy = canvasPoint[1] - center[1];
+      const rotatedX = dx * cosAngle - dy * sinAngle;
+      const rotatedY = dx * sinAngle + dy * cosAngle;
+      return [
+        rotatedX * scale + PREVIEW_WIDTH / 2,
+        rotatedY * scale + PREVIEW_HEIGHT / 2,
+      ];
+    };
+
+    const contoursByEdit = [...filteredContours].sort((a, b) => {
+      const timeA = a?.data?.modifiedAt || 0;
+      const timeB = b?.data?.modifiedAt || 0;
+      return timeA - timeB;
+    });
+
+    contoursByEdit.forEach(contour => {
+      const polyline = contour?.data?.contour?.polyline;
+      if (!polyline || polyline.length < 3) {
+        return;
+      }
+
+      const labelId = contour?.data?.labelId;
+      const labelIndex = labelId ? labelIdToIndex.get(labelId) : undefined;
+      if (!labelIndex) {
+        return;
+      }
+
+      const polygon = polyline.map(point => {
+        const canvasPoint = normalizeCanvasPoint(point);
+        const previewPoint = toPreviewPoint(canvasPoint);
+        return [
+          (previewPoint[0] - startX) * roiScaleX,
+          (previewPoint[1] - startY) * roiScaleY,
+        ];
+      });
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      polygon.forEach(([x, y]) => {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      });
+
+      const startXPixel = Math.max(0, Math.floor(minX));
+      const startYPixel = Math.max(0, Math.floor(minY));
+      const endXPixel = Math.min(roiMaskWidth - 1, Math.ceil(maxX));
+      const endYPixel = Math.min(roiMaskHeight - 1, Math.ceil(maxY));
+
+      for (let y = startYPixel; y <= endYPixel; y += 1) {
+        for (let x = startXPixel; x <= endXPixel; x += 1) {
+          if (isPointInPolygon([x + 0.5, y + 0.5], polygon)) {
+            maskData[y * roiMaskWidth + x] = labelIndex;
+          }
+        }
+      }
+    });
+
+    const overlayData = overlayImageData.data;
+    for (let i = 0; i < maskData.length; i += 1) {
+      const labelIndex = maskData[i];
+      if (!labelIndex) {
+        continue;
+      }
+
+      const labelInfo = labelMap[labelIndex];
+      if (!labelInfo) {
+        continue;
+      }
+
+      const labelState = labelStateMap.get(labelInfo.labelId);
+      if (labelState && !labelState.visible) {
+        continue;
+      }
+
+      const color = labelState?.color || labelInfo.labelColor;
+      const opacity = labelState?.opacity ?? 0.8;
+      const [r, g, b] = hexToRgb(color);
+      const alpha = Math.round(opacity * 255);
+      const dataIndex = i * 4;
+      overlayData[dataIndex] = r;
+      overlayData[dataIndex + 1] = g;
+      overlayData[dataIndex + 2] = b;
+      overlayData[dataIndex + 3] = alpha;
+    }
+
+    const overlayCanvas = document.createElement('canvas');
+    overlayCanvas.width = roiMaskWidth;
+    overlayCanvas.height = roiMaskHeight;
+    const overlayCtx = overlayCanvas.getContext('2d');
+    if (overlayCtx) {
+      overlayCtx.putImageData(overlayImageData, 0, 0);
+      ctx.drawImage(overlayCanvas, startX, startY, roiWidth, roiHeight);
+    }
+
+    if (seriesInstanceUID) {
+      const frameKey = imageId
+        ? imageId
+        : typeof currentFrameNumber === 'number'
+          ? `frame:${currentFrameNumber}`
+          : 'frame:unknown';
+      setRoiSegmentationFrame(seriesInstanceUID, frameKey, {
+        frameKey,
+        imageId: imageId || undefined,
+        frameNumber: currentFrameNumber || undefined,
+        roiAnnotationUID: roiAnnotation?.annotationUID,
+        width: roiMaskWidth,
+        height: roiMaskHeight,
+        maskData,
+        labelMap,
+        generatedAt: Date.now(),
+      });
+    }
+
     ctx.fillStyle = '#111827';
     ctx.beginPath();
     ctx.rect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
@@ -573,7 +894,14 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     }
 
     setRoiPreviewUrl(previewCanvas.toDataURL('image/png'));
-  }, [roiAnnotation, activeViewportId, cornerstoneViewportService, kymographSettings]);
+  }, [
+    roiAnnotation,
+    activeViewportId,
+    cornerstoneViewportService,
+    kymographSettings,
+    segmentationLabels,
+    displaySetService,
+  ]);
 
   useEffect(() => {
     renderRoiPreview();
@@ -610,7 +938,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
 
   const hasAnalysisRoi = !!roiAnnotation;
   const hasPreview = hasAnalysisRoi && !!roiPreviewUrl;
-  const segmentationPending = Object.values(segmentationSelections).some(Boolean);
+  const segmentationPending = segmentationLabels.some(label => label.visible);
   const frameLabel =
     frameInfo.index && frameInfo.total
       ? `Frame ${frameInfo.index}/${frameInfo.total}`
@@ -696,7 +1024,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           </div>
         )}
         {segmentationPending ? (
-          <div className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
+          <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
             Segmentation pending
           </div>
         ) : null}
@@ -728,10 +1056,12 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
               <select
                 className="appearance-none rounded border border-gray-700 bg-gray-900 px-2 py-1 pr-6 text-[11px] text-gray-200"
                 value={segmentationModel}
-                onChange={evt => setSegmentationModel(evt.target.value)}
+                onChange={evt => handleSegmentationModelChange(evt.target.value)}
               >
+                <option value="manual">Manual</option>
+                <option value="threshold">Threshold</option>
                 <option value="medsam">MedSAM</option>
-                <option value="unet-uterine">UNet-Uterine</option>
+                <option value="unet_uterine">UNet-Uterine</option>
               </select>
               <svg
                 className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-200"
@@ -750,22 +1080,63 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           </label>
         </div>
         <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-          {SEGMENTATION_LABELS.map(item => (
-            <label
-              key={item.id}
-              className="flex items-center"
-              style={{ color: item.color }}
-            >
-              <input
-                type="checkbox"
-                className="mr-2 rounded border-gray-600"
-                checked={segmentationSelections[item.id]}
-                disabled
-                readOnly
-              />
-              {item.label}
-            </label>
-          ))}
+          {SEGMENTATION_LABELS.map(item => {
+            const labelState = segmentationLabels.find(label => label.id === item.id);
+            const isVisible = labelState?.visible ?? false;
+            const hasLabel = Boolean(labelState);
+
+            return (
+              <div key={item.id} className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className={`flex h-5 w-5 items-center justify-center rounded transition-colors ${
+                    isVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-500'
+                  } ${hasLabel ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+                  title={
+                    hasLabel
+                      ? isVisible
+                        ? 'Hide contour'
+                        : 'Show contour'
+                      : 'No contour for this label'
+                  }
+                  onClick={() => {
+                    if (!hasLabel) {
+                      return;
+                    }
+                    setLabelVisibility(item.id, !isVisible);
+                  }}
+                  disabled={!hasLabel}
+                >
+                  {isVisible ? (
+                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                      />
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                      />
+                    </svg>
+                  ) : (
+                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"
+                      />
+                    </svg>
+                  )}
+                </button>
+                <span style={{ color: item.color }}>{item.label}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

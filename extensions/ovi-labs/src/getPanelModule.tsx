@@ -1,5 +1,5 @@
 import React from 'react';
-import { AnalysisContainerPanel } from './panels';
+import { AnalysisContainerPanel, SegmentationPanel } from './panels';
 
 export default function getPanelModule({
   commandsManager,
@@ -19,6 +19,13 @@ export default function getPanelModule({
       iconLabel: 'Analysis',
       label: 'Ovi Labs Analysis',
       component: () => <AnalysisContainerPanel {...childProps} />,
+    },
+    {
+      name: 'segmentation',
+      iconName: 'tab-segmentation',
+      iconLabel: 'Segmentation',
+      label: 'Segmentation',
+      component: () => <SegmentationPanel {...childProps} />,
     },
   ];
 }

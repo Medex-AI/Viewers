@@ -1,5 +1,4 @@
 import { utils } from '@ohif/core';
-import { isSuitableForOviLabs } from '@ohif/mode-ovi-labs';
 const { formatDate } = utils;
 
 const MOTION_ANALYSIS_URL =
@@ -59,51 +58,6 @@ export default {
         commandsManager.runCommand('openDICOMTagViewer', {
           displaySetInstanceUID,
         });
-      },
-    },
-    {
-      id: 'uterusAnalysis',
-      label: 'Uterus Analysis',
-      iconName: 'ExternalLink',
-      isVisible: ({ displaySetInstanceUID, servicesManager }: withAppTypes) => {
-        const { displaySetService } = servicesManager.services;
-        const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
-        return isSuitableForOviLabs(displaySet);
-      },
-      onClick: ({ servicesManager, displaySetInstanceUID }: withAppTypes) => {
-        const { displaySetService, uiNotificationService } = servicesManager.services;
-
-        if (!displaySetInstanceUID) {
-          uiNotificationService?.show?.({
-            title: 'Uterus Analysis',
-            message: 'No display set selected.',
-            type: 'warning',
-            duration: 3500,
-          });
-          return;
-        }
-
-        const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
-        const studyInstanceUID = displaySet?.StudyInstanceUID || displaySet?.studyInstanceUid;
-        const seriesInstanceUID = displaySet?.SeriesInstanceUID || displaySet?.seriesInstanceUid;
-
-        if (!studyInstanceUID || !seriesInstanceUID) {
-          uiNotificationService?.show?.({
-            title: 'Uterus Analysis',
-            message: 'Unable to determine the Study or Series InstanceUID.',
-            type: 'error',
-            duration: 3500,
-          });
-          return;
-        }
-
-        const targetUrl = `/ovi-labs?StudyInstanceUIDs=${encodeURIComponent(
-          studyInstanceUID
-        )}&SeriesInstanceUID=${encodeURIComponent(seriesInstanceUID)}`;
-
-        if (typeof window !== 'undefined') {
-          window.location.href = targetUrl;
-        }
       },
     },
   ],
