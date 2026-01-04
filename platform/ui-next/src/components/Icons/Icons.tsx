@@ -134,6 +134,7 @@ import {
   ToolContract,
   ToolExpand,
   ToolClickSegment,
+  ToolMaskContour,
 } from './Sources/Tools';
 import ActionNewDialog from './Sources/ActionNewDialog';
 import NotificationInfo from './Sources/NotificationInfo';
@@ -612,6 +613,7 @@ export const Icons = {
   'icon-tool-expand': (props: IconProps) => ToolExpand(props),
   'icon-tool-contract': (props: IconProps) => ToolContract(props),
   'icon-tool-shape': (props: IconProps) => ToolShape(props),
+  'tool-mask-contour': (props: IconProps) => ToolMaskContour(props),
   link: (props: IconProps) => Link(props),
   'icon-color-lut': (props: IconProps) => IconColorLUT(props),
   'icon-link': (props: IconProps) => Link(props),

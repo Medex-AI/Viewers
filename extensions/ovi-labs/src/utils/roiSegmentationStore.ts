@@ -3,6 +3,8 @@ export interface RoiSegmentationFrame {
   imageId?: string;
   frameNumber?: number;
   roiAnnotationUID?: string;
+  roiWidthWorld?: number;
+  roiHeightWorld?: number;
   width: number;
   height: number;
   maskData: Uint8Array;

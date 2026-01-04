@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { DicomMetadataStore } from '@ohif/core';
 import {
   SegmentationLabel,
   getSegmentationState,
@@ -9,6 +10,8 @@ import {
   subscribeSegmentationState,
 } from '../../utils/segmentationStore';
 import SegmentationThumbnail from './SegmentationThumbnail';
+import { getRoiSegmentationFrame } from '../../utils/roiSegmentationStore';
+import { calculateLabelAreas } from '../../utils/areaCalculator';
 
 interface SegmentationLabelsListProps {
   servicesManager?: any;
@@ -51,6 +54,27 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
     },
     [currentImageId]
   );
+
+  const labelAreas = useMemo(() => {
+    if (!currentImageId) {
+      return new Map();
+    }
+
+    const instance = DicomMetadataStore.getInstanceByImageId(currentImageId);
+    const seriesInstanceUID = instance?.SeriesInstanceUID;
+    if (!seriesInstanceUID) {
+      return new Map();
+    }
+
+    const frameKey = currentImageId;
+    const frame = getRoiSegmentationFrame(seriesInstanceUID, frameKey);
+    if (!frame) {
+      return new Map();
+    }
+
+    const areas = calculateLabelAreas(frame);
+    return new Map(areas.map(area => [area.labelId, area]));
+  }, [currentImageId, revision, roiAnnotation]);
 
   useEffect(() => {
     const unsubscribe = subscribeSegmentationState(state => {
@@ -255,6 +279,11 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
                   </span>
                   <span className="text-[10px] text-gray-500">
                     {label.annotations.length} frame{label.annotations.length !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-[10px] text-gray-500">
+                    {labelAreas.has(label.id)
+                      ? `${labelAreas.get(label.id)?.area.toFixed(1)} ${labelAreas.get(label.id)?.unit}`
+                      : 'Area: --'}
                   </span>
                 </div>
 

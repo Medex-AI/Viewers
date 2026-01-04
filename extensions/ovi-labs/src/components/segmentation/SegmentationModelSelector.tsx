@@ -15,7 +15,7 @@ type ModelOption = {
 
 const MODEL_OPTIONS: ModelOption[] = [
   { value: 'manual', label: 'Manual', available: true },
-  { value: 'threshold', label: 'Threshold', available: false },
+  { value: 'threshold', label: 'Threshold-Otsu', available: true },
   { value: 'medsam', label: 'MedSAM', available: false },
   { value: 'unet_uterine', label: 'UNet-Uterine', available: false },
 ];
@@ -65,20 +65,44 @@ const SegmentationModelSelector: React.FC<SegmentationModelSelectorProps> = ({
       } catch (e) {
         console.warn('Failed to activate ManualContour tool:', e);
       }
-    } else {
-      // Show notification for stub models
+      return;
+    }
+
+    if (model === 'threshold') {
+      // Activate MaskContour tool for Otsu boundary
+      try {
+        if (toolGroupService) {
+          toolGroupService.setToolActive('default', 'MaskContour', { mouseButton: 1 });
+        }
+      } catch (e) {
+        console.warn('Failed to activate MaskContour tool:', e);
+      }
       uiNotificationService?.show?.({
-        title: 'Segmentation Model',
-        message: `${MODEL_OPTIONS.find(m => m.value === model)?.label || model} model coming in Task 4.1.3`,
+        title: 'Threshold-Otsu',
+        message: 'Draw a mask contour first, then click Recompute to run Otsu segmentation.',
         type: 'info',
         duration: 3000,
       });
+      return;
     }
+
+    // Show notification for stub models
+    uiNotificationService?.show?.({
+      title: 'Segmentation Model',
+      message: `${MODEL_OPTIONS.find(m => m.value === model)?.label || model} model coming in Task 4.1.3`,
+      type: 'info',
+      duration: 3000,
+    });
   };
 
   const handleRecompute = () => {
     if (activeModel === 'manual') {
       // Manual doesn't need recompute
+      return;
+    }
+
+    if (activeModel === 'threshold') {
+      onRecompute?.();
       return;
     }
 
@@ -88,8 +112,6 @@ const SegmentationModelSelector: React.FC<SegmentationModelSelectorProps> = ({
       type: 'info',
       duration: 3000,
     });
-
-    onRecompute?.();
   };
 
   const activeOption = MODEL_OPTIONS.find(m => m.value === activeModel) || MODEL_OPTIONS[0];

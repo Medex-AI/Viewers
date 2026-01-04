@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { annotation } from '@cornerstonejs/tools';
-import { SegmentationLabel } from '../../utils/segmentationStore';
+import { SegmentationLabel, getFirstAnnotationUID } from '../../utils/segmentationStore';
 
 interface SegmentationThumbnailProps {
   label: SegmentationLabel;
@@ -52,9 +52,8 @@ const SegmentationThumbnail: React.FC<SegmentationThumbnailProps> = ({
     }
 
     // Get contour annotation
-    const contourAnnotation = label.annotationUID
-      ? annotation.state.getAnnotation(label.annotationUID)
-      : null;
+    const annotationUID = getFirstAnnotationUID(label);
+    const contourAnnotation = annotationUID ? annotation.state.getAnnotation(annotationUID) : null;
 
     // Get contour polyline - try contour.polyline first, then handles.points as fallback
     const contourPolyline =

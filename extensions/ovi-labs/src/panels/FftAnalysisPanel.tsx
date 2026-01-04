@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { metaData } from '@cornerstonejs/core';
 import {
   getRoiAnalysisData,
   subscribeRoiAnalysisData,
 } from '../utils/roiAnalysisDataStore';
+import { extractFrameTimingFromImageIds } from '../utils/dicomMetadataExtractor';
 import {
   compute2dFftMagnitudes,
   computeFftMagnitudes,
@@ -284,16 +284,16 @@ const FftAnalysisPanel: React.FC<FftAnalysisPanelProps> = ({
   }, [fftSource]);
 
   const metadataFrameRate = useMemo(() => {
-    const imageIds = analysisData?.imageIds || [];
-    for (const imageId of imageIds) {
-      const cineModule = metaData.get('cineModule', imageId);
-      const frameTime = Number(cineModule?.frameTime);
-      if (Number.isFinite(frameTime) && frameTime > 0) {
-        return 1000 / frameTime;
-      }
+    const directFrameRate = analysisData?.frameRate;
+    if (Number.isFinite(directFrameRate) && directFrameRate && directFrameRate > 0) {
+      return directFrameRate;
     }
-    return null;
-  }, [analysisData?.imageIds]);
+    const imageIds = analysisData?.imageIds || [];
+    if (!imageIds.length) {
+      return null;
+    }
+    return extractFrameTimingFromImageIds(imageIds).frameRate;
+  }, [analysisData?.frameRate, analysisData?.imageIds]);
 
   const resolvedFrameRate = useMemo(() => {
     const parsed = Number(frameRateInput);

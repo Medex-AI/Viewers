@@ -128,6 +128,23 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    id: 'MaskContour',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'tool-mask-contour',
+      label: 'Mask Contour',
+      tooltip: 'Mask contour tool for auto-segmentation boundary',
+      commands: {
+        ...setToolActiveToolbar,
+        commandOptions: {
+          ...setToolActiveToolbar.commandOptions,
+          toolName: 'MaskContour',
+        },
+      },
+      evaluate: 'evaluate.cornerstoneTool',
+    },
+  },
+  {
     id: 'CircleROI',
     uiType: 'ohif.toolButton',
     props: {

@@ -7,6 +7,9 @@ export type RoiAnalysisData = {
   step: number;
   frames: Float32Array[];
   spacing: { row: number | null; column: number | null };
+  frameTimeMs: number;
+  frameRate: number;
+  frameTimingSource: string;
   createdAt: number;
 };
 

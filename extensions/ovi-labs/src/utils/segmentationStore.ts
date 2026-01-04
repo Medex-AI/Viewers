@@ -42,12 +42,19 @@ export const getFirstAnnotationUID = (label: SegmentationLabel): string | undefi
 export interface SegmentationState {
   activeModel: ModelType;
   labels: SegmentationLabel[];
+  labelsByModel: Record<ModelType, SegmentationLabel[]>;
 }
 
 // Initial state
 let currentState: SegmentationState = {
   activeModel: 'manual',
   labels: [],
+  labelsByModel: {
+    manual: [],
+    threshold: [],
+    medsam: [],
+    unet_uterine: [],
+  },
 };
 
 type Subscriber = (state: SegmentationState) => void;
@@ -73,37 +80,30 @@ const triggerRender = () => {
   }
 };
 
+const applyModelVisibility = (model: ModelType): void => {
+  const labelsByModel = currentState.labelsByModel;
+  (Object.keys(labelsByModel) as ModelType[]).forEach(method => {
+    labelsByModel[method].forEach(label => {
+      label.annotations.forEach(ref => {
+        if (method === model && label.visible) {
+          showContour(ref.annotationUID, label.color, label.opacity);
+        } else {
+          setContourVisibility(ref.annotationUID, false);
+        }
+      });
+    });
+  });
+};
+
 // Set active model and update contour visibility accordingly
 export const setActiveModel = (model: ModelType): void => {
-  const previousModel = currentState.activeModel;
-  currentState = { ...currentState, activeModel: model };
+  currentState = {
+    ...currentState,
+    activeModel: model,
+    labels: currentState.labelsByModel[model] || [],
+  };
 
-  // When switching away from manual, hide all manual contours
-  // When switching to manual, show manual contours based on their visibility state
-  if (previousModel === 'manual' && model !== 'manual') {
-    // Hide all manual contours (all time frames)
-    currentState.labels.forEach(label => {
-      if (label.method === 'manual') {
-        label.annotations.forEach(ref => {
-          setContourVisibility(ref.annotationUID, false);
-        });
-      }
-    });
-  } else if (previousModel !== 'manual' && model === 'manual') {
-    // Show manual contours based on their visibility state (all time frames)
-    currentState.labels.forEach(label => {
-      if (label.method === 'manual') {
-        label.annotations.forEach(ref => {
-          if (label.visible) {
-            showContour(ref.annotationUID, label.color, label.opacity);
-          } else {
-            setContourVisibility(ref.annotationUID, false);
-          }
-        });
-      }
-    });
-  }
-
+  applyModelVisibility(model);
   triggerRender();
   notifySubscribers();
 };
@@ -168,18 +168,27 @@ const setContourOpacity = (annotationUID: string, color: string, opacity: number
 
 // Set label visibility - syncs with actual contours (all time frames)
 export const setLabelVisibility = (labelId: string, visible: boolean): void => {
-  const labelIndex = currentState.labels.findIndex(l => l.id === labelId);
+  const activeModel = currentState.activeModel;
+  const labelsForModel = currentState.labelsByModel[activeModel] || [];
+  const labelIndex = labelsForModel.findIndex(l => l.id === labelId);
   if (labelIndex === -1) return;
 
-  const label = currentState.labels[labelIndex];
+  const label = labelsForModel[labelIndex];
   const updatedLabel = { ...label, visible };
-  const updatedLabels = [...currentState.labels];
+  const updatedLabels = [...labelsForModel];
   updatedLabels[labelIndex] = updatedLabel;
 
-  currentState = { ...currentState, labels: updatedLabels };
+  currentState = {
+    ...currentState,
+    labels: updatedLabels,
+    labelsByModel: {
+      ...currentState.labelsByModel,
+      [activeModel]: updatedLabels,
+    },
+  };
 
   // Update actual contour visibility for all time frames (only if model is manual)
-  if (label.annotations.length > 0 && currentState.activeModel === 'manual') {
+  if (label.annotations.length > 0 && currentState.activeModel === activeModel) {
     label.annotations.forEach(ref => {
       if (visible) {
         // Restore visibility and color with opacity when showing
@@ -197,18 +206,27 @@ export const setLabelVisibility = (labelId: string, visible: boolean): void => {
 
 // Set label opacity - syncs with actual contours (all time frames)
 export const setLabelOpacity = (labelId: string, opacity: number): void => {
-  const labelIndex = currentState.labels.findIndex(l => l.id === labelId);
+  const activeModel = currentState.activeModel;
+  const labelsForModel = currentState.labelsByModel[activeModel] || [];
+  const labelIndex = labelsForModel.findIndex(l => l.id === labelId);
   if (labelIndex === -1) return;
 
-  const label = currentState.labels[labelIndex];
+  const label = labelsForModel[labelIndex];
   const updatedLabel = { ...label, opacity };
-  const updatedLabels = [...currentState.labels];
+  const updatedLabels = [...labelsForModel];
   updatedLabels[labelIndex] = updatedLabel;
 
-  currentState = { ...currentState, labels: updatedLabels };
+  currentState = {
+    ...currentState,
+    labels: updatedLabels,
+    labelsByModel: {
+      ...currentState.labelsByModel,
+      [activeModel]: updatedLabels,
+    },
+  };
 
   // Update actual contour opacity for all time frames
-  if (label.annotations.length > 0) {
+  if (label.annotations.length > 0 && currentState.activeModel === activeModel) {
     label.annotations.forEach(ref => {
       setContourOpacity(ref.annotationUID, label.color, opacity);
     });
@@ -239,7 +257,9 @@ const removeAnnotation = (annotationUID: string): void => {
 
 // Delete all time points for a label - removes all contours across all frames
 export const deleteAllTimePoints = (labelId: string): void => {
-  const label = currentState.labels.find(l => l.id === labelId);
+  const activeModel = currentState.activeModel;
+  const labelsForModel = currentState.labelsByModel[activeModel] || [];
+  const label = labelsForModel.find(l => l.id === labelId);
   if (!label) return;
 
   // Remove all annotations for this label
@@ -248,8 +268,15 @@ export const deleteAllTimePoints = (labelId: string): void => {
   });
 
   // Remove label from state
-  const updatedLabels = currentState.labels.filter(l => l.id !== labelId);
-  currentState = { ...currentState, labels: updatedLabels };
+  const updatedLabels = labelsForModel.filter(l => l.id !== labelId);
+  currentState = {
+    ...currentState,
+    labels: updatedLabels,
+    labelsByModel: {
+      ...currentState.labelsByModel,
+      [activeModel]: updatedLabels,
+    },
+  };
 
   // Force immediate viewport update
   setTimeout(() => {
@@ -261,10 +288,12 @@ export const deleteAllTimePoints = (labelId: string): void => {
 
 // Delete current time point for a label - removes only the contour on the specified frame
 export const deleteCurrentTimePoint = (labelId: string, referencedImageId: string): void => {
-  const labelIndex = currentState.labels.findIndex(l => l.id === labelId);
+  const activeModel = currentState.activeModel;
+  const labelsForModel = currentState.labelsByModel[activeModel] || [];
+  const labelIndex = labelsForModel.findIndex(l => l.id === labelId);
   if (labelIndex === -1) return;
 
-  const label = currentState.labels[labelIndex];
+  const label = labelsForModel[labelIndex];
 
   // Find the annotation for this specific time frame
   const annotationRef = label.annotations.find(ref => ref.referencedImageId === referencedImageId);
@@ -278,14 +307,28 @@ export const deleteCurrentTimePoint = (labelId: string, referencedImageId: strin
 
   if (updatedAnnotations.length === 0) {
     // No more annotations, remove the label entirely
-    const updatedLabels = currentState.labels.filter(l => l.id !== labelId);
-    currentState = { ...currentState, labels: updatedLabels };
+    const updatedLabels = labelsForModel.filter(l => l.id !== labelId);
+    currentState = {
+      ...currentState,
+      labels: updatedLabels,
+      labelsByModel: {
+        ...currentState.labelsByModel,
+        [activeModel]: updatedLabels,
+      },
+    };
   } else {
     // Update the label with remaining annotations
     const updatedLabel = { ...label, annotations: updatedAnnotations };
-    const updatedLabels = [...currentState.labels];
+    const updatedLabels = [...labelsForModel];
     updatedLabels[labelIndex] = updatedLabel;
-    currentState = { ...currentState, labels: updatedLabels };
+    currentState = {
+      ...currentState,
+      labels: updatedLabels,
+      labelsByModel: {
+        ...currentState.labelsByModel,
+        [activeModel]: updatedLabels,
+      },
+    };
   }
 
   // Force immediate viewport update
@@ -302,8 +345,13 @@ export const deleteLabel = deleteAllTimePoints;
 // Sync labels from ManualContour annotations
 // Creates ONE label per labelId (anatomical class), with multiple annotations for different time frames
 export const syncLabelsFromAnnotations = (contours: any[]): void => {
-  // Group contours by labelId, keeping ALL time frames (one annotation per frame)
-  const labelMap = new Map<string, AnnotationReference[]>();
+  // Group contours by modelType + labelId, keeping ALL time frames (one annotation per frame)
+  const labelsByModel: Record<ModelType, Map<string, AnnotationReference[]>> = {
+    manual: new Map(),
+    threshold: new Map(),
+    medsam: new Map(),
+    unet_uterine: new Map(),
+  };
 
   for (const contour of contours) {
     const labelId = contour?.data?.labelId;
@@ -312,18 +360,19 @@ export const syncLabelsFromAnnotations = (contours: any[]): void => {
     const labelDef = SEGMENTATION_LABELS.find(l => l.id === labelId);
     if (!labelDef) continue;
 
+    const modelType = (contour?.data?.modelType as ModelType) || 'manual';
     const referencedImageId = contour.metadata?.referencedImageId;
     const annotationRef: AnnotationReference = {
       annotationUID: contour.annotationUID,
       referencedImageId,
     };
 
-    if (!labelMap.has(labelId)) {
-      labelMap.set(labelId, []);
+    if (!labelsByModel[modelType].has(labelId)) {
+      labelsByModel[modelType].set(labelId, []);
     }
 
     // Check if we already have an annotation for this frame (shouldn't happen, but be safe)
-    const existingRefs = labelMap.get(labelId)!;
+    const existingRefs = labelsByModel[modelType].get(labelId)!;
     const existingForFrame = existingRefs.find(ref => ref.referencedImageId === referencedImageId);
     if (!existingForFrame) {
       existingRefs.push(annotationRef);
@@ -331,62 +380,47 @@ export const syncLabelsFromAnnotations = (contours: any[]): void => {
   }
 
   // Build new labels array
-  const newLabels: SegmentationLabel[] = [];
+  const newLabelsByModel: Record<ModelType, SegmentationLabel[]> = {
+    manual: [],
+    threshold: [],
+    medsam: [],
+    unet_uterine: [],
+  };
 
-  for (const [labelId, annotationRefs] of labelMap) {
-    const labelDef = SEGMENTATION_LABELS.find(l => l.id === labelId);
-    if (!labelDef) continue;
+  (Object.keys(labelsByModel) as ModelType[]).forEach(modelType => {
+    for (const [labelId, annotationRefs] of labelsByModel[modelType]) {
+      const labelDef = SEGMENTATION_LABELS.find(l => l.id === labelId);
+      if (!labelDef) continue;
 
-    // Get color from first annotation
-    const firstContour = contours.find(c => c.annotationUID === annotationRefs[0]?.annotationUID);
+      const firstContour = contours.find(c => c.annotationUID === annotationRefs[0]?.annotationUID);
+      const existingLabel = currentState.labelsByModel[modelType]?.find(l => l.id === labelId);
 
-    // Preserve existing visibility/opacity settings if available
-    const existingLabel = currentState.labels.find(l => l.id === labelId);
-
-    newLabels.push({
-      id: labelId,
-      name: labelDef.name,
-      color: firstContour?.data?.labelColor || labelDef.color,
-      visible: existingLabel?.visible ?? true,
-      opacity: existingLabel?.opacity ?? 0.8,
-      annotations: annotationRefs,
-      method: 'manual',
-    });
-  }
-
-  // Sort labels to maintain consistent order (by SEGMENTATION_LABELS order)
-  newLabels.sort((a, b) => {
-    const indexA = SEGMENTATION_LABELS.findIndex(l => l.id === a.id);
-    const indexB = SEGMENTATION_LABELS.findIndex(l => l.id === b.id);
-    return indexA - indexB;
-  });
-
-  // Check if labels actually changed (compare annotation UIDs)
-  const getAnnotationUIDs = (labels: SegmentationLabel[]) =>
-    labels.flatMap(l => l.annotations.map(a => a.annotationUID)).sort().join(',');
-
-  const labelsChanged =
-    newLabels.length !== currentState.labels.length ||
-    getAnnotationUIDs(newLabels) !== getAnnotationUIDs(currentState.labels);
-
-  if (labelsChanged) {
-    currentState = { ...currentState, labels: newLabels };
-
-    // Apply visibility/opacity to contours based on current state
-    if (currentState.activeModel === 'manual') {
-      newLabels.forEach(label => {
-        label.annotations.forEach(ref => {
-          if (label.visible) {
-            showContour(ref.annotationUID, label.color, label.opacity);
-          } else {
-            setContourVisibility(ref.annotationUID, false);
-          }
-        });
+      newLabelsByModel[modelType].push({
+        id: labelId,
+        name: labelDef.name,
+        color: firstContour?.data?.labelColor || labelDef.color,
+        visible: existingLabel?.visible ?? true,
+        opacity: existingLabel?.opacity ?? 0.8,
+        annotations: annotationRefs,
+        method: modelType,
       });
     }
 
-    notifySubscribers();
-  }
+    newLabelsByModel[modelType].sort((a, b) => {
+      const indexA = SEGMENTATION_LABELS.findIndex(l => l.id === a.id);
+      const indexB = SEGMENTATION_LABELS.findIndex(l => l.id === b.id);
+      return indexA - indexB;
+    });
+  });
+
+  currentState = {
+    ...currentState,
+    labelsByModel: newLabelsByModel,
+    labels: newLabelsByModel[currentState.activeModel] || [],
+  };
+
+  applyModelVisibility(currentState.activeModel);
+  notifySubscribers();
 };
 
 // Subscribe to state changes
@@ -402,6 +436,12 @@ export const resetSegmentationState = (): void => {
   currentState = {
     activeModel: 'manual',
     labels: [],
+    labelsByModel: {
+      manual: [],
+      threshold: [],
+      medsam: [],
+      unet_uterine: [],
+    },
   };
   notifySubscribers();
 };

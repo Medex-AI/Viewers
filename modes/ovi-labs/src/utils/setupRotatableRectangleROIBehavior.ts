@@ -1,4 +1,4 @@
-import { eventTarget, getEnabledElementByIds } from '@cornerstonejs/core';
+import { eventTarget, getEnabledElementByIds, metaData } from '@cornerstonejs/core';
 import { annotation, Enums } from '@cornerstonejs/tools';
 
 const TOOL_NAME = 'RotatableRectangleROI';
@@ -46,6 +46,12 @@ export default function setupRotatableRectangleROIBehavior() {
         newAnnotation.metadata.multiSliceReference = {
           referencedImageId: lastImageId,
         };
+
+        // Store SeriesInstanceUID to ensure ROI is unique per series
+        const instance = metaData.get('instance', firstImageId);
+        if (instance?.SeriesInstanceUID) {
+          newAnnotation.metadata.SeriesInstanceUID = instance.SeriesInstanceUID;
+        }
       }
     }
 
@@ -60,6 +66,7 @@ export default function setupRotatableRectangleROIBehavior() {
     });
 
     const frameOfReferenceUID = newAnnotation.metadata?.FrameOfReferenceUID;
+    const newSeriesInstanceUID = newAnnotation.metadata?.SeriesInstanceUID;
     const annotationManager = annotation.state.getAnnotationManager();
 
     if (!frameOfReferenceUID || !annotationManager) {
@@ -69,8 +76,24 @@ export default function setupRotatableRectangleROIBehavior() {
     const existingAnnotations =
       annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
 
+    // Only remove existing ROIs from the SAME series (not all ROIs in the frame of reference)
     existingAnnotations.forEach(existingAnnotation => {
-      if (existingAnnotation.annotationUID !== newAnnotation.annotationUID) {
+      if (existingAnnotation.annotationUID === newAnnotation.annotationUID) {
+        return;
+      }
+
+      const existingSeriesUID = existingAnnotation.metadata?.SeriesInstanceUID;
+
+      // Remove if:
+      // 1. Both have SeriesInstanceUID and they match (same series, replace old ROI)
+      // 2. New annotation has no SeriesInstanceUID (legacy behavior)
+      // 3. Existing annotation has no SeriesInstanceUID and neither does the new one
+      const shouldRemove =
+        !newSeriesInstanceUID ||
+        !existingSeriesUID ||
+        existingSeriesUID === newSeriesInstanceUID;
+
+      if (shouldRemove) {
         annotation.state.removeAnnotation(existingAnnotation.annotationUID);
       }
     });

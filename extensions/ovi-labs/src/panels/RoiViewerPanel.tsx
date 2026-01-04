@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { cache, eventTarget, Enums as csEnums, metaData } from '@cornerstonejs/core';
 import { annotation, Enums as toolEnums } from '@cornerstonejs/tools';
 import { useViewportGrid } from '@ohif/ui-next';
@@ -6,11 +6,14 @@ import {
   getRoiAnalysisData,
   setRoiAnalysisData,
 } from '../utils/roiAnalysisDataStore';
+import { setFrameRateFromMetadata } from '../utils/frameRateStore';
+import { extractFrameTimingFromImageIds, logFrameTiming } from '../utils/dicomMetadataExtractor';
 import {
   getKymographSettings,
   subscribeKymographSettings,
 } from '../utils/kymographSettingsStore';
 import {
+  SEGMENTATION_LABELS,
   getSegmentationState,
   setActiveModel,
   setLabelVisibility,
@@ -33,14 +36,9 @@ const MEDEX_ORANGE = '#F47620';
 const PREVIEW_WIDTH = 640;
 const PREVIEW_HEIGHT = 480;
 const MAX_ANALYSIS_SAMPLES = 256;
-const SEGMENTATION_LABELS = [
-  { id: 'uterineCavity', label: 'Uterine cavity', color: '#22D3EE' },
-  { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
-  { id: 'myometrium', label: 'Myometrium', color: '#FBBF24' },
-  { id: 'cervixCavity', label: 'Cervix cavity', color: '#60A5FA' },
-];
-
 const MANUAL_CONTOUR_TOOL = 'ManualContour';
+const MASK_CONTOUR_TOOL = 'MaskContour';
+const MASK_CONTOUR_COLOR = '#94A3B8';
 
 const hexToRgb = (hex: string): [number, number, number] => {
   const normalized = hex.replace('#', '');
@@ -97,11 +95,99 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
   const [segmentationLabels, setSegmentationLabels] = useState<SegmentationLabel[]>(
     getSegmentationState().labels
   );
+  const [currentFrameLabels, setCurrentFrameLabels] = useState<Set<string>>(new Set());
   const [kymographSettings, setKymographSettings] = useState(getKymographSettings());
+  const seriesKeyRef = useRef<string | null>(null);
   const [{ activeViewportId }] = useViewportGrid();
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
   const displaySetService = servicesManager?.services?.displaySetService;
   const viewportGridService = servicesManager?.services?.viewportGridService;
+
+  const getActiveImageId = useCallback(() => {
+    if (!activeViewportId || !cornerstoneViewportService) {
+      return null;
+    }
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+    if (!viewport) {
+      return null;
+    }
+    const currentImageId = viewport.getCurrentImageId?.();
+    if (currentImageId) {
+      return currentImageId;
+    }
+    const imageIds = viewport.getImageIds?.() || [];
+    return imageIds[0] || null;
+  }, [activeViewportId, cornerstoneViewportService]);
+
+  const getActiveFrameOfReferenceUID = useCallback(() => {
+    const imageId = getActiveImageId();
+    if (!imageId) {
+      return null;
+    }
+    const instance = metaData.get('instance', imageId) || {};
+    return instance.FrameOfReferenceUID || null;
+  }, [getActiveImageId]);
+
+  const getActiveSeriesInstanceUID = useCallback(() => {
+    if (activeViewportId && cornerstoneViewportService && displaySetService) {
+      const viewportInfo = cornerstoneViewportService.getViewportInfo?.(activeViewportId);
+      const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
+      const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
+      const displaySet = displaySetInstanceUID
+        ? displaySetService.getDisplaySetByUID(displaySetInstanceUID)
+        : null;
+      if (displaySet?.SeriesInstanceUID) {
+        return displaySet.SeriesInstanceUID;
+      }
+    }
+
+    const imageId = getActiveImageId();
+    if (!imageId) {
+      return null;
+    }
+    const instance = metaData.get('instance', imageId) || {};
+    return instance.SeriesInstanceUID || null;
+  }, [activeViewportId, cornerstoneViewportService, displaySetService, getActiveImageId]);
+
+  const getSeriesKey = useCallback((imageId?: string | null) => {
+    if (!imageId) {
+      return null;
+    }
+    const instance = metaData.get('instance', imageId) || {};
+    const studyUid = instance.StudyInstanceUID || '';
+    const seriesUid = instance.SeriesInstanceUID || '';
+    if (!studyUid && !seriesUid) {
+      return null;
+    }
+    return `${studyUid}::${seriesUid}`;
+  }, []);
+
+  const isRoiInActiveSeries = useCallback(
+    (annotationToCheck: any) => {
+      if (!annotationToCheck) {
+        return false;
+      }
+      const frameOfReferenceUID = getActiveFrameOfReferenceUID();
+      const seriesInstanceUID = getActiveSeriesInstanceUID();
+      const metadata = annotationToCheck?.metadata || {};
+      const data = annotationToCheck?.data || {};
+      const annotationFrameUID = metadata.FrameOfReferenceUID || data.FrameOfReferenceUID;
+      const annotationSeriesUID =
+        metadata.SeriesInstanceUID || data.seriesInstanceUID || data.SeriesInstanceUID;
+
+      if ((frameOfReferenceUID || seriesInstanceUID) && !annotationFrameUID && !annotationSeriesUID) {
+        return false;
+      }
+      if (frameOfReferenceUID && annotationFrameUID && annotationFrameUID !== frameOfReferenceUID) {
+        return false;
+      }
+      if (seriesInstanceUID && annotationSeriesUID && annotationSeriesUID !== seriesInstanceUID) {
+        return false;
+      }
+      return true;
+    },
+    [getActiveFrameOfReferenceUID, getActiveSeriesInstanceUID]
+  );
 
   useEffect(() => {
     const annotationManager = annotation.state.getAnnotationManager();
@@ -383,6 +469,19 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       return;
     }
 
+    const frameTiming = extractFrameTimingFromImageIds(frameImageIds);
+    logFrameTiming(frameTiming);
+    const seriesKey = getSeriesKey(frameImageIds[0]);
+    const isSeriesChanged = seriesKey && seriesKeyRef.current !== seriesKey;
+    if (seriesKey) {
+      seriesKeyRef.current = seriesKey;
+    }
+    setFrameRateFromMetadata(
+      frameTiming.frameRate,
+      frameTiming.source === 'Default' ? 'default' : 'metadata',
+      { force: isSeriesChanged }
+    );
+
     setRoiAnalysisData({
       annotationUID: roiAnnotation.annotationUID,
       roiRevision,
@@ -392,15 +491,44 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       step,
       frames,
       spacing,
+      frameTimeMs: frameTiming.frameTimeMs,
+      frameRate: frameTiming.frameRate,
+      frameTimingSource: frameTiming.source,
       createdAt: Date.now(),
     });
-  }, [roiAnnotation, activeViewportId, cornerstoneViewportService, roiRevision]);
+  }, [roiAnnotation, activeViewportId, cornerstoneViewportService, roiRevision, getSeriesKey]);
 
-  const getSelectedAnalysisRoi = () => {
+  const getSelectedAnalysisRoi = useCallback(() => {
+    const frameOfReferenceUID = getActiveFrameOfReferenceUID();
+    const seriesInstanceUID = getActiveSeriesInstanceUID();
+
+    const matchesActiveSeries = (annotationToCheck: any) => {
+      const metadata = annotationToCheck?.metadata || {};
+      const data = annotationToCheck?.data || {};
+      const annotationFrameUID = metadata.FrameOfReferenceUID || data.FrameOfReferenceUID;
+      const annotationSeriesUID =
+        metadata.SeriesInstanceUID || data.seriesInstanceUID || data.SeriesInstanceUID;
+
+      if ((frameOfReferenceUID || seriesInstanceUID) && !annotationFrameUID && !annotationSeriesUID) {
+        return false;
+      }
+
+      if (frameOfReferenceUID && annotationFrameUID && annotationFrameUID !== frameOfReferenceUID) {
+        return false;
+      }
+      if (seriesInstanceUID && annotationSeriesUID && annotationSeriesUID !== seriesInstanceUID) {
+        return false;
+      }
+      return true;
+    };
+
     const [selectedAnnotationUID] = annotation.selection.getAnnotationsSelected() || [];
     if (selectedAnnotationUID) {
       const selectedAnnotation = annotation.state.getAnnotation(selectedAnnotationUID);
-      if (selectedAnnotation?.metadata?.toolName === TOOL_NAME) {
+      if (
+        selectedAnnotation?.metadata?.toolName === TOOL_NAME &&
+        matchesActiveSeries(selectedAnnotation)
+      ) {
         return selectedAnnotation;
       }
     }
@@ -410,16 +538,59 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       return null;
     }
 
-    const framesOfReference = annotationManager.getFramesOfReference() || [];
-    for (const frameOfReference of framesOfReference) {
-      const annotations = annotationManager.getAnnotations(frameOfReference, TOOL_NAME) || [];
-      if (annotations.length) {
-        return annotations[0];
+    if (frameOfReferenceUID) {
+      const annotations = annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
+      const matched = annotations.find(item => matchesActiveSeries(item));
+      if (matched) {
+        return matched;
+      }
+    } else {
+      const framesOfReference = annotationManager.getFramesOfReference() || [];
+      for (const frameOfReference of framesOfReference) {
+        const annotations = annotationManager.getAnnotations(frameOfReference, TOOL_NAME) || [];
+        const matched = annotations.find(item => matchesActiveSeries(item));
+        if (matched) {
+          return matched;
+        }
       }
     }
 
     return null;
-  };
+  }, [getActiveFrameOfReferenceUID, getActiveSeriesInstanceUID]);
+
+  const updateFrameRateForViewport = useCallback(() => {
+    if (!activeViewportId || !cornerstoneViewportService) {
+      return;
+    }
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+    if (!viewport?.getImageIds) {
+      return;
+    }
+    const imageIds = viewport.getImageIds() || [];
+    if (!imageIds.length) {
+      return;
+    }
+    const currentImageId = viewport.getCurrentImageId?.() || imageIds[0];
+    const seriesKey = getSeriesKey(currentImageId);
+    if (!seriesKey || seriesKeyRef.current === seriesKey) {
+      return;
+    }
+    seriesKeyRef.current = seriesKey;
+    const nextRoi = getSelectedAnalysisRoi();
+    setRoiAnnotation(nextRoi);
+    setRoiRevision(revision => revision + 1);
+    const frameTiming = extractFrameTimingFromImageIds(imageIds);
+    logFrameTiming(frameTiming);
+    setFrameRateFromMetadata(
+      frameTiming.frameRate,
+      frameTiming.source === 'Default' ? 'default' : 'metadata',
+      { force: true }
+    );
+  }, [activeViewportId, cornerstoneViewportService, getSeriesKey, getSelectedAnalysisRoi]);
+
+  useEffect(() => {
+    updateFrameRateForViewport();
+  }, [updateFrameRateForViewport]);
 
   useEffect(() => {
     const updateRoiState = () => {
@@ -439,15 +610,35 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     eventTarget.addEventListener(removedEvt, updateRoiState);
     eventTarget.addEventListener(selectionEvt, updateRoiState);
 
+    const subscriptions = [];
+    if (viewportGridService?.subscribe) {
+      subscriptions.push(
+        viewportGridService.subscribe(
+          viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,
+          updateRoiState
+        )
+      );
+      subscriptions.push(
+        viewportGridService.subscribe(viewportGridService.EVENTS.GRID_STATE_CHANGED, updateRoiState)
+      );
+    }
+
     return () => {
       eventTarget.removeEventListener(addedEvt, updateRoiState);
       eventTarget.removeEventListener(modifiedEvt, updateRoiState);
       eventTarget.removeEventListener(removedEvt, updateRoiState);
       eventTarget.removeEventListener(selectionEvt, updateRoiState);
+      subscriptions.forEach(subscription => subscription.unsubscribe());
     };
-  }, []);
+  }, [getSelectedAnalysisRoi, viewportGridService]);
 
   const renderRoiPreview = useCallback(() => {
+    if (roiAnnotation && !isRoiInActiveSeries(roiAnnotation)) {
+      setRoiAnnotation(null);
+      setRoiPreviewUrl(null);
+      setRoiAnalysisData(null);
+      return;
+    }
     if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
       setRoiPreviewUrl(null);
       return;
@@ -608,7 +799,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       labelIdToIndex.set(label.id, labelIndex);
       labelMap[labelIndex] = {
         labelId: label.id,
-        labelName: label.label,
+        labelName: label.name,
         labelColor: label.color,
       };
     });
@@ -625,6 +816,11 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const seriesInstanceUID = displaySet?.SeriesInstanceUID;
 
     const filteredContours = contourAnnotations.filter(contour => {
+      const contourModelType = contour?.data?.modelType || 'manual';
+      if (contourModelType !== segmentationModel) {
+        return false;
+      }
+
       if (seriesInstanceUID && contour?.data?.seriesInstanceUID) {
         if (contour.data.seriesInstanceUID !== seriesInstanceUID) {
           return false;
@@ -642,6 +838,16 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
 
       return false;
     });
+
+    // Update currentFrameLabels with which labels have contours on current frame
+    const labelsOnCurrentFrame = new Set<string>();
+    filteredContours.forEach(contour => {
+      const labelId = contour?.data?.labelId;
+      if (labelId) {
+        labelsOnCurrentFrame.add(labelId);
+      }
+    });
+    setCurrentFrameLabels(labelsOnCurrentFrame);
 
     const roiMaskWidth = Math.max(1, Math.round(roiWidth));
     const roiMaskHeight = Math.max(1, Math.round(roiHeight));
@@ -682,7 +888,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     });
 
     contoursByEdit.forEach(contour => {
-      const polyline = contour?.data?.contour?.polyline;
+      const polyline = contour?.data?.contour?.polyline || contour?.data?.handles?.points;
       if (!polyline || polyline.length < 3) {
         return;
       }
@@ -745,7 +951,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       }
 
       const color = labelState?.color || labelInfo.labelColor;
-      const opacity = labelState?.opacity ?? 0.8;
+      const opacity = labelState?.opacity ?? 0.3;
       const [r, g, b] = hexToRgb(color);
       const alpha = Math.round(opacity * 255);
       const dataIndex = i * 4;
@@ -764,6 +970,103 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       ctx.drawImage(overlayCanvas, startX, startY, roiWidth, roiHeight);
     }
 
+    // Render MaskContour annotations as dashed outline
+    const maskAnnotations =
+      annotation.state.getAnnotations(MASK_CONTOUR_TOOL, element as HTMLElement) || [];
+    const filteredMasks = maskAnnotations.filter(mask => {
+      if (seriesInstanceUID && mask?.data?.seriesInstanceUID) {
+        if (mask.data.seriesInstanceUID !== seriesInstanceUID) {
+          return false;
+        }
+      }
+
+      if (imageId && mask?.metadata?.referencedImageId) {
+        return mask.metadata.referencedImageId === imageId;
+      }
+
+      const frameNumber = mask?.data?.frameNumber || mask?.metadata?.frameNumber;
+      if (currentFrameNumber && frameNumber) {
+        return frameNumber === currentFrameNumber;
+      }
+
+      return false;
+    });
+
+    // Draw mask contours as dashed outlines
+    filteredMasks.forEach(mask => {
+      const polyline = mask?.data?.contour?.polyline || mask?.data?.handles?.points;
+      if (!polyline || polyline.length < 3) {
+        return;
+      }
+
+      // Transform contour points to preview canvas space
+      const previewPoints = polyline.map(point => {
+        const canvasPoint = normalizeCanvasPoint(point);
+        return toPreviewPoint(canvasPoint);
+      });
+
+      // Draw dashed outline
+      ctx.save();
+      ctx.strokeStyle = MASK_CONTOUR_COLOR;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      previewPoints.forEach((point, index) => {
+        if (index === 0) {
+          ctx.moveTo(point[0], point[1]);
+        } else {
+          ctx.lineTo(point[0], point[1]);
+        }
+      });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    });
+
+    // Draw manual contour outlines on top of filled overlay
+    contoursByEdit.forEach(contour => {
+      const polyline = contour?.data?.contour?.polyline || contour?.data?.handles?.points;
+      if (!polyline || polyline.length < 3) {
+        return;
+      }
+
+      const labelId = contour?.data?.labelId;
+      const labelIndex = labelId ? labelIdToIndex.get(labelId) : undefined;
+      if (!labelIndex) {
+        return;
+      }
+
+      const labelState = labelStateMap.get(labelId);
+      if (labelState && !labelState.visible) {
+        return;
+      }
+
+      const color = labelState?.color || labelMap[labelIndex]?.labelColor || '#FFFFFF';
+
+      // Transform contour points to preview canvas space
+      const previewPoints = polyline.map(point => {
+        const canvasPoint = normalizeCanvasPoint(point);
+        return toPreviewPoint(canvasPoint);
+      });
+
+      // Draw solid outline
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      previewPoints.forEach((point, index) => {
+        if (index === 0) {
+          ctx.moveTo(point[0], point[1]);
+        } else {
+          ctx.lineTo(point[0], point[1]);
+        }
+      });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    });
+
     if (seriesInstanceUID) {
       const frameKey = imageId
         ? imageId
@@ -775,6 +1078,8 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         imageId: imageId || undefined,
         frameNumber: currentFrameNumber || undefined,
         roiAnnotationUID: roiAnnotation?.annotationUID,
+        roiWidthWorld: widthWorld,
+        roiHeightWorld: heightWorld,
         width: roiMaskWidth,
         height: roiMaskHeight,
         maskData,
@@ -901,6 +1206,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     kymographSettings,
     segmentationLabels,
     displaySetService,
+    isRoiInActiveSeries,
   ]);
 
   useEffect(() => {
@@ -923,6 +1229,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     }
 
     const handleRender = () => {
+      updateFrameRateForViewport();
       renderRoiPreview();
       buildRoiAnalysisData();
     };
@@ -934,11 +1241,19 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       element.removeEventListener(csEnums.Events.IMAGE_RENDERED, handleRender);
       window.removeEventListener('resize', handleRender);
     };
-  }, [activeViewportId, cornerstoneViewportService, renderRoiPreview, buildRoiAnalysisData]);
+  }, [
+    activeViewportId,
+    cornerstoneViewportService,
+    renderRoiPreview,
+    buildRoiAnalysisData,
+    updateFrameRateForViewport,
+  ]);
 
   const hasAnalysisRoi = !!roiAnnotation;
   const hasPreview = hasAnalysisRoi && !!roiPreviewUrl;
-  const segmentationPending = segmentationLabels.some(label => label.visible);
+  // Only show pending for non-manual models when backend computation is in progress
+  // For manual model, contours are user-drawn so never "pending"
+  const segmentationPending = false; // TODO: Connect to actual backend computation state
   const frameLabel =
     frameInfo.index && frameInfo.total
       ? `Frame ${frameInfo.index}/${frameInfo.total}`
@@ -1083,29 +1398,32 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           {SEGMENTATION_LABELS.map(item => {
             const labelState = segmentationLabels.find(label => label.id === item.id);
             const isVisible = labelState?.visible ?? false;
-            const hasLabel = Boolean(labelState);
+            const hasLabelOnCurrentFrame = currentFrameLabels.has(item.id);
+            const hasLabelAnywhere = Boolean(labelState);
 
             return (
               <div key={item.id} className="flex items-center gap-2">
                 <button
                   type="button"
                   className={`flex h-5 w-5 items-center justify-center rounded transition-colors ${
-                    isVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-500'
-                  } ${hasLabel ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+                    hasLabelOnCurrentFrame && isVisible ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-500'
+                  } ${hasLabelAnywhere ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
                   title={
-                    hasLabel
+                    hasLabelOnCurrentFrame
                       ? isVisible
                         ? 'Hide contour'
                         : 'Show contour'
-                      : 'No contour for this label'
+                      : hasLabelAnywhere
+                        ? 'No contour on this frame'
+                        : 'No contour for this label'
                   }
                   onClick={() => {
-                    if (!hasLabel) {
+                    if (!hasLabelAnywhere) {
                       return;
                     }
                     setLabelVisibility(item.id, !isVisible);
                   }}
-                  disabled={!hasLabel}
+                  disabled={!hasLabelAnywhere}
                 >
                   {isVisible ? (
                     <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1133,7 +1451,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
                     </svg>
                   )}
                 </button>
-                <span style={{ color: item.color }}>{item.label}</span>
+                <span style={{ color: item.color }}>{item.name}</span>
               </div>
             );
           })}

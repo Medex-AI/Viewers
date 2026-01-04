@@ -3747,3 +3747,40 @@ export const ToolContract = (props: IconProps) => (
     />
   </svg>
 );
+
+export const ToolMaskContour = (props: IconProps) => (
+  <svg
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    {...props}
+  >
+    {/* Dashed rectangle outline */}
+    <rect
+      x="3"
+      y="5"
+      width="18"
+      height="14"
+      rx="2"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeDasharray="4 2"
+      fill="none"
+    />
+    {/* Mask text in center */}
+    <text
+      x="12"
+      y="13"
+      textAnchor="middle"
+      dominantBaseline="middle"
+      fill="currentColor"
+      fontSize="7"
+      fontWeight="600"
+      fontFamily="system-ui, -apple-system, sans-serif"
+    >
+      Mask
+    </text>
+  </svg>
+);

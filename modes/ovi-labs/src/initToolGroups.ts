@@ -20,6 +20,7 @@ function initToolGroups(extensionManager, toolGroupService) {
       { toolName: toolNames.RectangleROI },
       { toolName: toolNames.RotatableRectangleROI },
       { toolName: toolNames.ManualContour },
+      { toolName: toolNames.MaskContour },
       { toolName: toolNames.CalibrationLine },
     ],
     enabled: [{ toolName: toolNames.ImageOverlayViewer }],

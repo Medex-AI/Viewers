@@ -6,6 +6,7 @@ import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleR
 import setupManualContourBehavior, {
   showManualContourLabelMenu,
 } from './utils/setupManualContourBehavior';
+import setupMaskContourBehavior from './utils/setupMaskContourBehavior';
 import setupManipulationToolsCursor from './utils/setupManipulationToolsCursor';
 import viewportClickCommandsCustomization from './customizations/viewportClickCommandsCustomization';
 import './styles.css';
@@ -133,6 +134,7 @@ function setSeriesFromQuery({ servicesManager, commandsManager }) {
 function modeFactory({ modeConfiguration }) {
   let teardownRotatableRectangleROIBehavior;
   let teardownManualContourBehavior;
+  let teardownMaskContourBehavior;
   let teardownManipulationToolsCursor;
   let commandsManagerRef;
 
@@ -161,9 +163,11 @@ function modeFactory({ modeConfiguration }) {
       initToolGroups(extensionManager, toolGroupService);
       teardownRotatableRectangleROIBehavior?.();
       teardownManualContourBehavior?.();
+      teardownMaskContourBehavior?.();
       teardownManipulationToolsCursor?.();
       teardownRotatableRectangleROIBehavior = setupRotatableRectangleROIBehavior();
       teardownManualContourBehavior = setupManualContourBehavior(servicesManager);
+      teardownMaskContourBehavior = setupMaskContourBehavior(servicesManager);
       teardownManipulationToolsCursor = setupManipulationToolsCursor();
 
       toolbarService.addButtons(toolbarButtons);
@@ -177,6 +181,7 @@ function modeFactory({ modeConfiguration }) {
         'Cine',
         'RotatableRectangleROI',
         'ManualContour',
+        'MaskContour',
       ]);
       toolbarService.createButtonSection('measurementSection', [
         'Length',
@@ -207,6 +212,8 @@ function modeFactory({ modeConfiguration }) {
       teardownRotatableRectangleROIBehavior = undefined;
       teardownManualContourBehavior?.();
       teardownManualContourBehavior = undefined;
+      teardownMaskContourBehavior?.();
+      teardownMaskContourBehavior = undefined;
       teardownManipulationToolsCursor?.();
       teardownManipulationToolsCursor = undefined;
     },

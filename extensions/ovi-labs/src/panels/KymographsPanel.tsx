@@ -9,6 +9,7 @@ import {
 } from '../utils/kymographSettingsStore';
 import {
   getFrameRate,
+  getFrameRateSource,
   setFrameRate,
   subscribeFrameRate,
 } from '../utils/frameRateStore';
@@ -230,6 +231,53 @@ const Dropdown: React.FC<DropdownProps> = ({
   );
 };
 
+type TimeAxisFormat = 's' | 'mm:ss' | 'hh:mm:ss';
+
+const resolveTimeAxisFormat = (durationSeconds: number): TimeAxisFormat => {
+  if (durationSeconds >= 3600) {
+    return 'hh:mm:ss';
+  }
+  if (durationSeconds >= 60) {
+    return 'mm:ss';
+  }
+  return 's';
+};
+
+const padTwo = (value: number) => value.toString().padStart(2, '0');
+
+const formatTimeLabel = (seconds: number, format: TimeAxisFormat) => {
+  if (format === 's') {
+    if (seconds < 10) {
+      return seconds.toFixed(2);
+    }
+    if (seconds < 100) {
+      return seconds.toFixed(1);
+    }
+    return seconds.toFixed(0);
+  }
+
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+
+  if (format === 'hh:mm:ss') {
+    return `${padTwo(hours)}:${padTwo(minutes)}:${padTwo(secs)}`;
+  }
+
+  return `${padTwo(minutes)}:${padTwo(secs)}`;
+};
+
+const timeAxisLabel = (format: TimeAxisFormat) => {
+  if (format === 'mm:ss') {
+    return 'Time (mm:ss)';
+  }
+  if (format === 'hh:mm:ss') {
+    return 'Time (hh:mm:ss)';
+  }
+  return 'Time (s)';
+};
+
 const KymographsPanel: React.FC<KymographsPanelProps> = ({
   commandsManager,
   servicesManager,
@@ -242,7 +290,23 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
   const [analysisData, setAnalysisData] = useState(getRoiAnalysisData());
   const [frameRateValue, setFrameRateValue] = useState(getFrameRate());
   const [frameRateInput, setFrameRateInput] = useState(getFrameRate().toString());
+  const [hoverInfo, setHoverInfo] = useState<{
+    x: number;
+    y: number;
+    frameNumber: number;
+    timeSeconds: number;
+  } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const layoutRef = useRef<{
+    leftMargin: number;
+    topMargin: number;
+    imageWidth: number;
+    imageHeight: number;
+    timeCount: number;
+    frameTimeMs: number;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
 
   useEffect(() => {
     const unsubscribe = subscribeRoiAnalysisData(nextData => {
@@ -419,7 +483,13 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
       return baseSteps[baseSteps.length - 1] * magnitude;
     };
 
-    const durationSeconds = frameRateValue > 0 ? timeCount / frameRateValue : timeCount;
+    const frameSource = getFrameRateSource();
+    const frameTimeMs =
+      frameSource === 'manual' && frameRateValue > 0
+        ? 1000 / frameRateValue
+        : analysisData?.frameTimeMs || (frameRateValue > 0 ? 1000 / frameRateValue : 0);
+    const durationSeconds = frameTimeMs > 0 ? (timeCount * frameTimeMs) / 1000 : timeCount;
+    const axisFormat = resolveTimeAxisFormat(durationSeconds);
     const tickEveryTimeUnit = calculateTickSpacing(durationSeconds);
     const tickEveryTimePixel =
       durationSeconds > 0 ? (tickEveryTimeUnit / durationSeconds) * imageWidth : 0;
@@ -448,14 +518,14 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
         ctx.lineTo(x, bottomY + tickLength);
         ctx.stroke();
         if (tickIndex !== 0) {
-          ctx.fillText(labelValue.toFixed(2), x, bottomY + tickLength + labelOffset);
+          ctx.fillText(formatTimeLabel(labelValue, axisFormat), x, bottomY + tickLength + labelOffset);
         }
         tickIndex += 1;
       }
 
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.fillText('Time (s)', containerWidth / 2, containerHeight - 2);
+      ctx.fillText(timeAxisLabel(axisFormat), containerWidth / 2, containerHeight - 2);
     }
 
     if (tickEverySpatialPixel > 6) {
@@ -474,7 +544,17 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
         tickIndex += 1;
       }
     }
-  }, [kymograph, selectedColormap, analysisData]);
+    layoutRef.current = {
+      leftMargin,
+      topMargin,
+      imageWidth,
+      imageHeight,
+      timeCount,
+      frameTimeMs,
+      containerWidth,
+      containerHeight,
+    };
+  }, [kymograph, selectedColormap, analysisData, frameRateValue]);
 
     return (
     <div className="flex h-full w-full flex-col overflow-y-auto bg-black p-4 text-white">
@@ -564,12 +644,60 @@ const KymographsPanel: React.FC<KymographsPanelProps> = ({
         {kymograph ? (
           <div className="flex h-full w-full flex-col">
             <div className="flex-1 p-3">
-              <div className="h-full w-full rounded bg-black">
+              <div className="relative h-full w-full rounded bg-black">
                 <canvas
                   ref={canvasRef}
                   className="h-full w-full"
                   style={{ imageRendering: 'pixelated' }}
+                  onMouseMove={event => {
+                    const layout = layoutRef.current;
+                    if (!layout) {
+                      setHoverInfo(null);
+                      return;
+                    }
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const x = event.clientX - rect.left;
+                    const y = event.clientY - rect.top;
+                    const withinX =
+                      x >= layout.leftMargin && x <= layout.leftMargin + layout.imageWidth;
+                    const withinY =
+                      y >= layout.topMargin && y <= layout.topMargin + layout.imageHeight;
+                    if (!withinX || !withinY) {
+                      setHoverInfo(null);
+                      return;
+                    }
+                    const xRatio = (x - layout.leftMargin) / layout.imageWidth;
+                    const clamped = Math.min(1, Math.max(0, xRatio));
+                    const frameNumber =
+                      Math.round(clamped * (layout.timeCount - 1)) + 1;
+                    const timeSeconds =
+                      layout.frameTimeMs > 0
+                        ? ((frameNumber - 1) * layout.frameTimeMs) / 1000
+                        : frameNumber - 1;
+                    setHoverInfo({ x, y, frameNumber, timeSeconds });
+                  }}
+                  onMouseLeave={() => setHoverInfo(null)}
                 />
+                {hoverInfo ? (
+                  <div
+                    className="pointer-events-none absolute rounded bg-gray-900 px-2 py-1 text-[10px] text-gray-100"
+                    style={{
+                      left: Math.max(
+                        6,
+                        Math.min(
+                          hoverInfo.x + 10,
+                          (layoutRef.current?.containerWidth || 0) - 120
+                        )
+                      ),
+                      top: Math.max(
+                        (layoutRef.current?.topMargin || 0) + 6,
+                        hoverInfo.y - 24
+                      ),
+                    }}
+                  >
+                    Frame {hoverInfo.frameNumber} ({hoverInfo.timeSeconds.toFixed(1)}s)
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="border-t border-gray-800 px-3 py-2 text-[11px] text-gray-400">

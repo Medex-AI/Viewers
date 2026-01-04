@@ -98,11 +98,13 @@ const updateAnnotationLabel = (annotationToUpdate, labelId, element) => {
   }
 
   const labelConfig = getLabelConfig(labelId);
+  const modelType = annotationToUpdate?.data?.modelType || 'manual';
   annotationToUpdate.data = {
     ...annotationToUpdate.data,
     labelId,
     labelName: labelConfig.label,
     labelColor: labelConfig.color,
+    modelType,
     modifiedAt: Date.now(),
   };
 
@@ -130,6 +132,7 @@ const updateAnnotationLabel = (annotationToUpdate, labelId, element) => {
     if (
       existingAnnotation.annotationUID !== annotationToUpdate.annotationUID &&
       existingAnnotation.data?.labelId === labelId &&
+      (existingAnnotation.data?.modelType || 'manual') === modelType &&
       existingAnnotation.metadata?.referencedImageId === currentImageId
     ) {
       annotation.state.removeAnnotation(existingAnnotation.annotationUID);
