@@ -26,6 +26,23 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    id: 'DebugProbe',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'tool-probe',
+      label: 'Probe',
+      tooltip: 'Probe tool - Show pixel intensity, world and pixel coordinate',
+      commands: {
+        ...setToolActiveToolbar,
+        commandOptions: {
+          ...setToolActiveToolbar.commandOptions,
+          toolName: 'DebugProbe',
+        },
+      },
+      evaluate: 'evaluate.cornerstoneTool',
+    },
+  },
+  {
     id: 'Length',
     uiType: 'ohif.toolButton',
     props: {

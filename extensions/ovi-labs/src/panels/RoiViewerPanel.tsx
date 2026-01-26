@@ -13,6 +13,10 @@ import {
   subscribeKymographSettings,
 } from '../utils/kymographSettingsStore';
 import {
+  getRoiPreviewSettings,
+  subscribeRoiPreviewSettings,
+} from '../utils/roiPreviewSettingsStore';
+import {
   SEGMENTATION_LABELS,
   getSegmentationState,
   setActiveModel,
@@ -23,6 +27,15 @@ import {
   syncLabelsFromAnnotations,
 } from '../utils/segmentationStore';
 import { setRoiSegmentationFrame } from '../utils/roiSegmentationStore';
+import {
+  buildNiftiBuffer,
+  buildTiffBuffer,
+  downloadBlob,
+  gzipBuffer,
+  requestSaveHandle,
+  RoiExportFrame,
+  writeBufferToHandle,
+} from '../utils/roiExport';
 
 interface RoiViewerPanelProps {
   commandsManager?: any;
@@ -97,11 +110,21 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
   );
   const [currentFrameLabels, setCurrentFrameLabels] = useState<Set<string>>(new Set());
   const [kymographSettings, setKymographSettings] = useState(getKymographSettings());
+  const [roiPreviewSettings, setRoiPreviewSettings] = useState(getRoiPreviewSettings());
+  const [exportFormat, setExportFormat] = useState<'nifti' | 'nifti_gz' | 'tiff' | 'debug'>('nifti_gz');
+  const debugPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const accuratePreviewTimeoutRef = useRef<number | null>(null);
+  const accuratePreviewTokenRef = useRef(0);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [previewMode, setPreviewMode] = useState<'fast' | 'accurate'>('fast');
+  const exportInProgressRef = useRef(false);
   const seriesKeyRef = useRef<string | null>(null);
   const [{ activeViewportId }] = useViewportGrid();
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
   const displaySetService = servicesManager?.services?.displaySetService;
   const viewportGridService = servicesManager?.services?.viewportGridService;
+  const uiNotificationService = servicesManager?.services?.uiNotificationService;
 
   const getActiveImageId = useCallback(() => {
     if (!activeViewportId || !cornerstoneViewportService) {
@@ -274,6 +297,13 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
   useEffect(() => {
     const unsubscribe = subscribeKymographSettings(settings => {
       setKymographSettings(settings);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeRoiPreviewSettings(settings => {
+      setRoiPreviewSettings(settings);
     });
     return unsubscribe;
   }, []);
@@ -497,6 +527,793 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       createdAt: Date.now(),
     });
   }, [roiAnnotation, activeViewportId, cornerstoneViewportService, roiRevision, getSeriesKey]);
+
+  const buildTemporalRoiStack = useCallback((options: { imageIds?: string[]; maxFrames?: number } = {}) => {
+    if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
+      return null;
+    }
+
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+    if (!viewport) {
+      return null;
+    }
+
+    const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
+    if (points.length < 4) {
+      return null;
+    }
+
+    const imageIds = options.imageIds || viewport.getImageIds?.() || [];
+    if (!imageIds.length) {
+      return null;
+    }
+    const limitedImageIds = Number.isFinite(options.maxFrames)
+      ? imageIds.slice(0, Math.max(1, options.maxFrames as number))
+      : imageIds;
+
+    const shouldLog = (window as any)?.__MEDEX_DEBUG_ROI_EXPORT === true;
+
+    const getWorldToIndex = () => {
+      if (viewport.worldToIndex) {
+        return (point: number[]) => viewport.worldToIndex(point);
+      }
+
+      const imagePlane = metaData.get('imagePlaneModule', imageIds[0]);
+      const orientation = imagePlane?.imageOrientationPatient;
+      const position = imagePlane?.imagePositionPatient;
+      const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+      const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+      if (shouldLog) {
+        // eslint-disable-next-line no-console
+        console.info('[ROI Export] imagePlaneModule', {
+          imageId: imageIds[0],
+          orientation,
+          position,
+          rowSpacing,
+          colSpacing,
+        });
+      }
+
+      if (!orientation || !position) {
+        return null;
+      }
+
+      const rowCosines = [orientation[0], orientation[1], orientation[2]];
+      const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+      return (point: number[]) => {
+        const dx = point[0] - position[0];
+        const dy = point[1] - position[1];
+        const dz = point[2] - position[2];
+        const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+        const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+        return [col, row, 0];
+      };
+    };
+
+    const worldToIndex = getWorldToIndex();
+    if (!worldToIndex) {
+      return null;
+    }
+
+    const indexedPoints = points.map(point => ({
+      world: point,
+      index: worldToIndex(point),
+      canvas: viewport.worldToCanvas ? viewport.worldToCanvas(point) : null,
+    }));
+    if (shouldLog) {
+      // eslint-disable-next-line no-console
+      console.info('[ROI Export] ROI points', {
+        world: indexedPoints.map(item => item.world),
+        index: indexedPoints.map(item => item.index),
+        canvas: indexedPoints.map(item => item.canvas),
+      });
+    }
+    if (indexedPoints.some(point => !point.index || point.index.length < 2)) {
+      return null;
+    }
+
+    if (indexedPoints.some(point => !point.canvas || point.canvas.length < 2)) {
+      return null;
+    }
+
+    const canvasCenter = indexedPoints.reduce(
+      (acc, point) => {
+        acc[0] += point.canvas![0];
+        acc[1] += point.canvas![1];
+        return acc;
+      },
+      [0, 0]
+    );
+    canvasCenter[0] /= indexedPoints.length;
+    canvasCenter[1] /= indexedPoints.length;
+
+    const ordered = {
+      topLeft: null as typeof indexedPoints[number] | null,
+      topRight: null as typeof indexedPoints[number] | null,
+      bottomLeft: null as typeof indexedPoints[number] | null,
+      bottomRight: null as typeof indexedPoints[number] | null,
+    };
+
+    indexedPoints.forEach(point => {
+      const dx = point.canvas![0] - canvasCenter[0];
+      const dy = point.canvas![1] - canvasCenter[1];
+      if (dx <= 0 && dy <= 0) {
+        ordered.topLeft = point;
+      } else if (dx > 0 && dy <= 0) {
+        ordered.topRight = point;
+      } else if (dx <= 0 && dy > 0) {
+        ordered.bottomLeft = point;
+      } else {
+        ordered.bottomRight = point;
+      }
+    });
+
+    if (!ordered.topLeft || !ordered.topRight || !ordered.bottomLeft || !ordered.bottomRight) {
+      return null;
+    }
+
+    let bottomLeft = ordered.bottomLeft.index!;
+    let bottomRight = ordered.bottomRight.index!;
+    let topLeft = ordered.topLeft.index!;
+
+    const canvasTopLeft = ordered.topLeft.canvas!;
+    const canvasTopRight = ordered.topRight.canvas!;
+    const canvasBottomLeft = ordered.bottomLeft.canvas!;
+    const indexTopLeft = ordered.topLeft.index!;
+    const indexTopRight = ordered.topRight.index!;
+    const indexBottomLeft = ordered.bottomLeft.index!;
+    const indexDeltaX = [
+      indexTopRight[0] - indexTopLeft[0],
+      indexTopRight[1] - indexTopLeft[1],
+    ];
+    const indexDeltaY = [
+      indexBottomLeft[0] - indexTopLeft[0],
+      indexBottomLeft[1] - indexTopLeft[1],
+    ];
+    const xAxisIsCol = Math.abs(indexDeltaX[0]) >= Math.abs(indexDeltaX[1]);
+    const yAxisIsRow = Math.abs(indexDeltaY[1]) >= Math.abs(indexDeltaY[0]);
+    const shouldSwapIndexAxes = !xAxisIsCol && !yAxisIsRow;
+    if (shouldSwapIndexAxes) {
+      if (shouldLog) {
+        // eslint-disable-next-line no-console
+        console.info('[ROI Export] Swapping index axes based on canvas alignment', {
+          canvasTopLeft,
+          canvasTopRight,
+          canvasBottomLeft,
+          indexDeltaX,
+          indexDeltaY,
+        });
+      }
+      const swapAxis = (point: number[]) => [point[1], point[0], point[2]];
+      bottomLeft = swapAxis(bottomLeft);
+      bottomRight = swapAxis(bottomRight);
+      topLeft = swapAxis(topLeft);
+    }
+
+    const widthVec = [
+      bottomRight[0] - bottomLeft[0],
+      bottomRight[1] - bottomLeft[1],
+    ];
+    const heightVec = [
+      topLeft[0] - bottomLeft[0],
+      topLeft[1] - bottomLeft[1],
+    ];
+
+    const widthLength = Math.hypot(widthVec[0], widthVec[1]);
+    const heightLength = Math.hypot(heightVec[0], heightVec[1]);
+
+    if (!widthLength || !heightLength) {
+      return null;
+    }
+
+    const widthSamples = Math.max(1, Math.round(widthLength));
+    const heightSamples = Math.max(1, Math.round(heightLength));
+    const unitWidth = [widthVec[0] / widthSamples, widthVec[1] / widthSamples];
+    const unitHeight = [heightVec[0] / heightSamples, heightVec[1] / heightSamples];
+    let outputWidth = widthSamples;
+    let outputHeight = heightSamples;
+    if (shouldLog) {
+      // eslint-disable-next-line no-console
+      console.info('[ROI Export] ROI vectors', {
+        bottomLeft,
+        bottomRight,
+        topLeft,
+        widthVec,
+        heightVec,
+        widthLength,
+        heightLength,
+        widthSamples,
+        heightSamples,
+      });
+    }
+
+    const frames: RoiExportFrame[] = [];
+    const frameImageIds: string[] = [];
+    let spacing: { row: number | null; column: number | null } = { row: null, column: null };
+    let sampleType: 'int16' | 'uint16' | 'uint8' | 'float32' | null = null;
+
+    let outputDimensionsLocked = false;
+
+    limitedImageIds.forEach(imageId => {
+      const image = cache.getImage(imageId);
+      const pixelData = image?.getPixelData?.() ?? image?.pixelData;
+      const columns = image?.columns ?? image?.width ?? 0;
+      const rows = image?.rows ?? image?.height ?? 0;
+
+      if (!pixelData || !columns || !rows) {
+        return;
+      }
+
+      if (!spacing.row || !spacing.column) {
+        const calibratedSpacing = metaData.get('calibratedPixelSpacing', imageId);
+        const imagePlane = metaData.get('imagePlaneModule', imageId);
+        spacing = {
+          column:
+            calibratedSpacing?.columnPixelSpacing ??
+            imagePlane?.columnPixelSpacing ??
+            null,
+          row:
+            calibratedSpacing?.rowPixelSpacing ?? imagePlane?.rowPixelSpacing ?? null,
+        };
+        if (shouldLog) {
+          // eslint-disable-next-line no-console
+          console.info('[ROI Export] spacing', {
+            imageId,
+            calibratedSpacing,
+            imagePlane,
+            spacing,
+          });
+        }
+      }
+
+      if (!sampleType) {
+        if (pixelData instanceof Int16Array) {
+          sampleType = 'int16';
+        } else if (pixelData instanceof Uint16Array) {
+          sampleType = 'uint16';
+        } else if (pixelData instanceof Uint8Array) {
+          sampleType = 'uint8';
+        } else {
+          sampleType = 'float32';
+        }
+      }
+
+      // Helper function for bilinear interpolation
+      const bilinearSample = (x: number, y: number): number => {
+        // Return 0 (black) for out-of-bounds coordinates
+        if (x < 0 || x >= columns || y < 0 || y >= rows) {
+          return 0;
+        }
+
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const x1 = x0 + 1;
+        const y1 = y0 + 1;
+
+        // Get the four neighboring pixels
+        const fx = x - x0;
+        const fy = y - y0;
+
+        // Return 0 for any neighbor that falls outside bounds
+        const v00 = (x0 >= 0 && x0 < columns && y0 >= 0 && y0 < rows)
+          ? (pixelData[y0 * columns + x0] || 0) : 0;
+        const v10 = (x1 >= 0 && x1 < columns && y0 >= 0 && y0 < rows)
+          ? (pixelData[y0 * columns + x1] || 0) : 0;
+        const v01 = (x0 >= 0 && x0 < columns && y1 >= 0 && y1 < rows)
+          ? (pixelData[y1 * columns + x0] || 0) : 0;
+        const v11 = (x1 >= 0 && x1 < columns && y1 >= 0 && y1 < rows)
+          ? (pixelData[y1 * columns + x1] || 0) : 0;
+
+        // Bilinear interpolation
+        const v0 = v00 * (1 - fx) + v10 * fx;
+        const v1 = v01 * (1 - fx) + v11 * fx;
+        const value = v0 * (1 - fy) + v1 * fy;
+
+        return Number.isFinite(value) ? value : 0;
+      };
+      const nearestSample = (x: number, y: number): number => {
+        const col = Math.floor(x);
+        const row = Math.floor(y);
+        if (col < 0 || col >= columns || row < 0 || row >= rows) {
+          return 0;
+        }
+        const value = pixelData[row * columns + col];
+        return Number.isFinite(value) ? value : 0;
+      };
+      const sample =
+        roiPreviewSettings.accurateInterpolation === 'nearest'
+          ? nearestSample
+          : bilinearSample;
+
+      // Sample the data in the natural ROI orientation (top to bottom, left to right)
+      let tempData: number[] = [];
+      for (let rowIndex = 0; rowIndex < heightSamples; rowIndex += 1) {
+        const rowOffset = rowIndex + 0.5;
+        const baseX = topLeft[0] - unitHeight[0] * rowOffset;
+        const baseY = topLeft[1] - unitHeight[1] * rowOffset;
+
+        for (let colIndex = 0; colIndex < widthSamples; colIndex += 1) {
+          const colOffset = colIndex + 0.5;
+          const sampleX = baseX + unitWidth[0] * colOffset;
+          const sampleY = baseY + unitWidth[1] * colOffset;
+
+          const value = sample(sampleX, sampleY);
+          tempData.push(value);
+        }
+      }
+
+      const transformedData = tempData;
+      const transformedWidth = widthSamples;
+      const transformedHeight = heightSamples;
+
+      if (!outputDimensionsLocked) {
+        outputWidth = transformedWidth;
+        outputHeight = transformedHeight;
+        outputDimensionsLocked = true;
+      }
+
+      let frameData: RoiExportFrame;
+      switch (sampleType) {
+        case 'int16':
+          frameData = new Int16Array(outputWidth * outputHeight);
+          break;
+        case 'uint16':
+          frameData = new Uint16Array(outputWidth * outputHeight);
+          break;
+        case 'uint8':
+          frameData = new Uint8Array(outputWidth * outputHeight);
+          break;
+        default:
+          frameData = new Float32Array(outputWidth * outputHeight);
+          break;
+      }
+      const copyLength = Math.min(frameData.length, transformedData.length);
+      for (let i = 0; i < copyLength; i++) {
+        const value = transformedData[i];
+        frameData[i] = Number.isFinite(value) ? value : 0;
+      }
+
+      frames.push(frameData);
+      frameImageIds.push(imageId);
+    });
+
+    if (!frames.length) {
+      return null;
+    }
+
+    const frameTiming = extractFrameTimingFromImageIds(frameImageIds);
+
+    return {
+      frames,
+      imageIds: frameImageIds,
+      width: outputWidth,
+      height: outputHeight,
+      spacing,
+      frameTimeMs: frameTiming.frameTimeMs,
+    };
+  }, [
+    roiAnnotation,
+    activeViewportId,
+    cornerstoneViewportService,
+    roiPreviewSettings,
+  ]);
+
+  const renderAccurateRoiPreview = useCallback(() => {
+    if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
+      return;
+    }
+
+    const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+    if (!viewport) {
+      return;
+    }
+
+    const imageId =
+      viewport.getCurrentImageId?.() || roiAnnotation?.metadata?.referencedImageId;
+    if (!imageId) {
+      return;
+    }
+
+    const stack = buildTemporalRoiStack({ imageIds: [imageId], maxFrames: 1 });
+    if (!stack || !stack.frames?.length) {
+      return;
+    }
+
+    const image = cache.getImage(imageId);
+    const windowCenterRaw = image?.windowCenter;
+    const windowWidthRaw = image?.windowWidth;
+    const windowCenter = Array.isArray(windowCenterRaw) ? windowCenterRaw[0] : windowCenterRaw;
+    const windowWidth = Array.isArray(windowWidthRaw) ? windowWidthRaw[0] : windowWidthRaw;
+    const slope = Number.isFinite(image?.slope) ? image?.slope : 1;
+    const intercept = Number.isFinite(image?.intercept) ? image?.intercept : 0;
+    const invert = image?.invert === true;
+
+    const frame = stack.frames[0];
+    const roiWidth = stack.width;
+    const roiHeight = stack.height;
+
+    const useWindow = Number.isFinite(windowCenter) && Number.isFinite(windowWidth);
+    let min = Infinity;
+    let max = -Infinity;
+    if (!useWindow) {
+      for (let i = 0; i < frame.length; i++) {
+        const value = frame[i];
+        if (Number.isFinite(value)) {
+          min = Math.min(min, value);
+          max = Math.max(max, value);
+        }
+      }
+    }
+    const range = max - min || 1;
+    const lower = useWindow ? windowCenter - 0.5 - (windowWidth - 1) / 2 : null;
+    const upper = useWindow ? windowCenter - 0.5 + (windowWidth - 1) / 2 : null;
+
+    // Create temporary ROI-sized canvas for pixel data
+    const roiCanvas = document.createElement('canvas');
+    roiCanvas.width = Math.max(1, Math.round(roiWidth));
+    roiCanvas.height = Math.max(1, Math.round(roiHeight));
+    const roiCtx = roiCanvas.getContext('2d');
+    if (!roiCtx) {
+      return;
+    }
+
+    const roiImageData = roiCtx.createImageData(roiCanvas.width, roiCanvas.height);
+    for (let i = 0; i < frame.length; i++) {
+      let value;
+      if (useWindow && lower != null && upper != null) {
+        const scaled = frame[i] * slope + intercept;
+        if (scaled <= lower) {
+          value = 0;
+        } else if (scaled > upper) {
+          value = 255;
+        } else {
+          value = Math.round(((scaled - lower) / (upper - lower)) * 255);
+        }
+      } else {
+        value = Math.round(((frame[i] - min) / range) * 255);
+      }
+      const clamped = Math.max(0, Math.min(255, value));
+      const mapped = invert ? 255 - clamped : clamped;
+      const idx = i * 4;
+      roiImageData.data[idx] = mapped;
+      roiImageData.data[idx + 1] = mapped;
+      roiImageData.data[idx + 2] = mapped;
+      roiImageData.data[idx + 3] = 255;
+    }
+    roiCtx.putImageData(roiImageData, 0, 0);
+
+    // Store ROI canvas for debug export
+    debugPreviewCanvasRef.current = roiCanvas;
+
+    // Create fixed-size preview canvas with DPR scaling
+    const dpr = window.devicePixelRatio || 1;
+    const previewCanvas = document.createElement('canvas');
+    previewCanvas.width = Math.round(PREVIEW_WIDTH * dpr);
+    previewCanvas.height = Math.round(PREVIEW_HEIGHT * dpr);
+    const ctx = previewCanvas.getContext('2d');
+    if (!ctx) {
+      return;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+    ctx.imageSmoothingEnabled = false;
+
+    // Scale ROI to fit within fixed canvas (like fast preview)
+    const scale = Math.min(PREVIEW_WIDTH / roiWidth, PREVIEW_HEIGHT / roiHeight);
+    const scaledWidth = roiWidth * scale;
+    const scaledHeight = roiHeight * scale;
+    const startX = (PREVIEW_WIDTH - scaledWidth) / 2;
+    const startY = (PREVIEW_HEIGHT - scaledHeight) / 2;
+
+    // Draw scaled ROI onto preview canvas
+    ctx.drawImage(roiCanvas, startX, startY, scaledWidth, scaledHeight);
+
+    // Apply dark mask outside ROI region
+    ctx.fillStyle = '#111827';
+    ctx.beginPath();
+    ctx.rect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+    ctx.rect(startX, startY, scaledWidth, scaledHeight);
+    ctx.fill('evenodd');
+
+    // Draw orange border
+    ctx.strokeStyle = MEDEX_ORANGE;
+    ctx.lineWidth = 4;
+    ctx.strokeRect(0.75, 0.75, PREVIEW_WIDTH - 1.5, PREVIEW_HEIGHT - 1.5);
+
+    // Get spacing info for axis labels
+    const calibratedSpacing = metaData.get('calibratedPixelSpacing', imageId);
+    const imagePlaneModule = metaData.get('imagePlaneModule', imageId);
+    const spacingX =
+      calibratedSpacing?.columnPixelSpacing ?? imagePlaneModule?.columnPixelSpacing ?? null;
+    const spacingY =
+      calibratedSpacing?.rowPixelSpacing ?? imagePlaneModule?.rowPixelSpacing ?? null;
+    const hasSpacing =
+      typeof spacingX === 'number' &&
+      typeof spacingY === 'number' &&
+      Number.isFinite(spacingX) &&
+      Number.isFinite(spacingY) &&
+      spacingX > 0 &&
+      spacingY > 0 &&
+      !imagePlaneModule?.usingDefaultValues;
+
+    // Calculate world dimensions for tick marks
+    const roiWidthUnits = hasSpacing ? roiWidth * spacingX : roiWidth;
+    const roiHeightUnits = hasSpacing ? roiHeight * spacingY : roiHeight;
+    const maxUnits = Math.max(roiWidthUnits, roiHeightUnits);
+
+    const targetTicks = 5;
+    const rawStep = maxUnits > 0 ? maxUnits / targetTicks : 10;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep || 1)));
+    const baseSteps = [1, 2, 5, 10];
+    let tickEveryUnit = baseSteps[baseSteps.length - 1] * magnitude;
+    for (const base of baseSteps) {
+      const candidate = base * magnitude;
+      if (candidate >= rawStep) {
+        tickEveryUnit = candidate;
+        break;
+      }
+    }
+
+    // Convert tick spacing from world units to canvas pixels
+    const tickEveryPxX = roiWidthUnits > 0 ? (tickEveryUnit / roiWidthUnits) * scaledWidth : 0;
+    const tickEveryPxY = roiHeightUnits > 0 ? (tickEveryUnit / roiHeightUnits) * scaledHeight : 0;
+    const unitLabel = hasSpacing ? 'mm' : 'px';
+
+    // Draw axis ticks and labels
+    if (tickEveryPxX > 6 || tickEveryPxY > 6) {
+      const tickLength = 16;
+      const labelOffset = 6;
+      const fontSize = 40;
+      const originalLineWidth = ctx.lineWidth;
+      ctx.lineWidth = 4;
+
+      ctx.fillStyle = MEDEX_ORANGE;
+      ctx.font = `${fontSize}px Arial, Helvetica, sans-serif`;
+
+      if (tickEveryPxX > 6) {
+        let tickIndex = 0;
+        for (let x = 0; x <= PREVIEW_WIDTH + 0.5; x += tickEveryPxX) {
+          const labelValue = tickIndex * tickEveryUnit;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, tickLength);
+          ctx.stroke();
+          if (tickIndex !== 0) {
+            ctx.fillText(`${labelValue}${unitLabel}`, x, tickLength + labelOffset);
+          }
+          tickIndex += 1;
+        }
+      }
+
+      if (tickEveryPxY > 6) {
+        let tickIndex = 0;
+        for (let y = 0; y <= PREVIEW_HEIGHT + 0.5; y += tickEveryPxY) {
+          const labelValue = tickIndex * tickEveryUnit;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(tickLength, y);
+          ctx.stroke();
+          if (tickIndex !== 0) {
+            ctx.fillText(`${labelValue}${unitLabel}`, tickLength + labelOffset, y);
+          }
+          tickIndex += 1;
+        }
+      }
+      ctx.lineWidth = originalLineWidth;
+    }
+
+    if (kymographSettings.showProfileLine) {
+      const isHorizontalProfile =
+        kymographSettings.spatialAxis === 'major'
+          ? roiWidthUnits >= roiHeightUnits
+          : roiWidthUnits < roiHeightUnits;
+
+      ctx.strokeStyle = '#22C55E';
+      ctx.lineWidth = 4;
+      ctx.setLineDash([8, 4]);
+
+      if (isHorizontalProfile) {
+        const midY = PREVIEW_HEIGHT / 2;
+        ctx.beginPath();
+        ctx.moveTo(0, midY);
+        ctx.lineTo(PREVIEW_WIDTH, midY);
+        ctx.stroke();
+      } else {
+        const midX = PREVIEW_WIDTH / 2;
+        ctx.beginPath();
+        ctx.moveTo(midX, 0);
+        ctx.lineTo(midX, PREVIEW_HEIGHT);
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([]);
+    }
+
+    setRoiPreviewUrl(previewCanvas.toDataURL('image/png'));
+    setPreviewMode('accurate');
+  }, [
+    activeViewportId,
+    buildTemporalRoiStack,
+    cornerstoneViewportService,
+    kymographSettings,
+    roiAnnotation,
+  ]);
+
+  const scheduleAccuratePreview = useCallback(() => {
+    if (accuratePreviewTimeoutRef.current) {
+      window.clearTimeout(accuratePreviewTimeoutRef.current);
+    }
+    const token = ++accuratePreviewTokenRef.current;
+    accuratePreviewTimeoutRef.current = window.setTimeout(() => {
+      if (token !== accuratePreviewTokenRef.current) {
+        return;
+      }
+      renderAccurateRoiPreview();
+    }, roiPreviewSettings.accuratePreviewDelayMs);
+  }, [renderAccurateRoiPreview, roiPreviewSettings]);
+
+  const handleDebugExport = useCallback(async () => {
+    renderAccurateRoiPreview();
+    const debugData = (window as any).__MEDEX_ROI_DEBUG_DATA;
+    const previewCanvas = debugPreviewCanvasRef.current;
+
+    if (!debugData || !previewCanvas) {
+      uiNotificationService?.show?.({
+        title: 'Debug Export',
+        message: 'No ROI data available. Please select an ROI first.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const baseName = `roi-debug-${timestamp}`;
+
+    // Export JSON
+    const jsonBlob = new Blob(
+      [JSON.stringify(debugData, null, 2)],
+      { type: 'application/json' }
+    );
+    downloadBlob(jsonBlob, `${baseName}.json`);
+
+    // Export preview PNG
+    const pngDataUrl = previewCanvas.toDataURL('image/png');
+    const pngBlob = await fetch(pngDataUrl).then(r => r.blob());
+    downloadBlob(pngBlob, `${baseName}.png`);
+
+    uiNotificationService?.show?.({
+      title: 'Debug Export',
+      message: 'Exported JSON and PNG files.',
+      type: 'success',
+    });
+  }, [renderAccurateRoiPreview, uiNotificationService]);
+
+  const handleTemporalExport = useCallback(async () => {
+    if (isExporting) {
+      return;
+    }
+
+    // Handle debug export separately
+    if (exportFormat === 'debug') {
+      await handleDebugExport();
+      return;
+    }
+
+    setIsExporting(true);
+    setExportProgress(10);
+    exportInProgressRef.current = true;
+      let warningTimeout: number | null = null;
+
+    try {
+      const stack = buildTemporalRoiStack();
+      if (!stack) {
+        uiNotificationService?.show?.({
+          title: 'Temporal ROI Export',
+          message: 'Temporal ROI data is not available for export.',
+          type: 'warning',
+        });
+        return;
+      }
+
+      const { frames, width, height, spacing, frameTimeMs, imageIds } = stack;
+      const instance = imageIds[0] ? metaData.get('instance', imageIds[0]) : null;
+      const seriesUid = instance?.SeriesInstanceUID || 'series';
+      const baseName = `temporal-roi-${seriesUid}`;
+      setExportProgress(40);
+
+      let saveHandle: FileSystemFileHandle | null = null;
+      const tentativeExtension =
+        exportFormat === 'nifti_gz' ? 'nii.gz' : exportFormat === 'nifti' ? 'nii' : 'tiff';
+      const suggestedName = `${baseName}.${tentativeExtension}`;
+      try {
+        saveHandle = await requestSaveHandle(
+          suggestedName,
+          exportFormat === 'tiff' ? 'image/tiff' : 'application/octet-stream'
+        );
+      } catch (error) {
+        if ((error as DOMException)?.name !== 'AbortError') {
+          throw error;
+        }
+        return;
+      }
+
+      warningTimeout = window.setTimeout(() => {
+        if (!exportInProgressRef.current) {
+          return;
+        }
+        uiNotificationService?.show?.({
+          title: 'Temporal ROI Export',
+          message: 'Export is taking longer than expected. Please wait.',
+          type: 'warning',
+        });
+      }, 3000);
+
+      if (exportFormat === 'nifti' || exportFormat === 'nifti_gz') {
+        const niftiBuffer = buildNiftiBuffer({
+          frames,
+          width,
+          height,
+          spacing,
+          frameTimeMs,
+        });
+        setExportProgress(70);
+        let outputBuffer = niftiBuffer;
+        let extension = 'nii';
+        if (exportFormat === 'nifti_gz' && typeof CompressionStream !== 'undefined') {
+          outputBuffer = await gzipBuffer(niftiBuffer, (progress) => {
+            setExportProgress(progress);
+          });
+          extension = 'nii.gz';
+        }
+        setExportProgress(85);
+        const fileName = `${baseName}.${extension}`;
+        if (saveHandle) {
+          await writeBufferToHandle(saveHandle, outputBuffer, 'application/octet-stream');
+        } else {
+          downloadBlob(new Blob([outputBuffer], { type: 'application/octet-stream' }), fileName);
+        }
+      } else {
+        const tiffBuffer = buildTiffBuffer({ frames, width, height });
+        setExportProgress(85);
+        const fileName = `${baseName}.tiff`;
+        if (saveHandle) {
+          await writeBufferToHandle(saveHandle, tiffBuffer, 'image/tiff');
+        } else {
+          downloadBlob(new Blob([tiffBuffer], { type: 'image/tiff' }), fileName);
+        }
+      }
+
+      setExportProgress(100);
+      uiNotificationService?.show?.({
+        title: 'Temporal ROI Export',
+        message: 'Export completed.',
+        type: 'success',
+      });
+    } catch (error) {
+      uiNotificationService?.show?.({
+        title: 'Temporal ROI Export',
+        message: 'Export failed. See console for details.',
+        type: 'error',
+      });
+      // eslint-disable-next-line no-console
+      console.error('Temporal ROI export failed', error);
+    } finally {
+      if (warningTimeout) {
+        window.clearTimeout(warningTimeout);
+      }
+      setIsExporting(false);
+      exportInProgressRef.current = false;
+      setTimeout(() => setExportProgress(0), 400);
+    }
+  }, [buildTemporalRoiStack, exportFormat, handleDebugExport, isExporting, uiNotificationService]);
 
   const getSelectedAnalysisRoi = useCallback(() => {
     const frameOfReferenceUID = getActiveFrameOfReferenceUID();
@@ -784,6 +1601,93 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     ctx.drawImage(sourceCanvas, 0, 0, drawWidth, drawHeight);
     ctx.restore();
 
+    // Store a ROI-sized canvas for debug export (before overlays are drawn).
+    {
+      const roiCanvas = document.createElement('canvas');
+      const roiWidth = Math.max(1, Math.round(width));
+      const roiHeight = Math.max(1, Math.round(height));
+      roiCanvas.width = Math.round(roiWidth * dpr);
+      roiCanvas.height = Math.round(roiHeight * dpr);
+      const roiCtx = roiCanvas.getContext('2d');
+      if (roiCtx) {
+        roiCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        roiCtx.fillStyle = '#111827';
+        roiCtx.fillRect(0, 0, roiWidth, roiHeight);
+        roiCtx.imageSmoothingEnabled = true;
+        roiCtx.save();
+        roiCtx.translate(roiWidth / 2, roiHeight / 2);
+        roiCtx.rotate(-angle);
+        roiCtx.translate(-center[0], -center[1]);
+        roiCtx.drawImage(sourceCanvas, 0, 0, drawWidth, drawHeight);
+        roiCtx.restore();
+      }
+      debugPreviewCanvasRef.current = roiCanvas;
+    }
+
+    // Debug data exposure for TDD testing and debug export
+    {
+      const imagePlane = imagePlaneModule;
+      const orientation = imagePlane?.imageOrientationPatient;
+      const position = imagePlane?.imagePositionPatient;
+      const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+      const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+      let indexPoints: number[][] | null = null;
+      if (orientation && position) {
+        const rowCosines = [orientation[0], orientation[1], orientation[2]];
+        const colCosines = [orientation[3], orientation[4], orientation[5]];
+        indexPoints = points.map((pt: number[]) => {
+          const dx = pt[0] - position[0];
+          const dy = pt[1] - position[1];
+          const dz = pt[2] - position[2];
+          const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+          const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+          return [col, row];
+        });
+      }
+
+      // Try to get image dimensions
+      const cachedImage = imageId ? cache.getImage(imageId) : null;
+
+      const roiPreviewWidth = Math.max(1, Math.round(width));
+      const roiPreviewHeight = Math.max(1, Math.round(height));
+
+      (window as any).__MEDEX_ROI_DEBUG_DATA = {
+        worldPoints: points,
+        canvasPoints,
+        indexPoints,
+        widthCanvas: width,
+        heightCanvas: height,
+        widthWorld: widthWorld,
+        heightWorld: heightWorld,
+        angleRad: angle,
+        centerCanvas: center,
+        previewScale: scale,
+        previewDimensions: { width: roiPreviewWidth, height: roiPreviewHeight },
+        previewCanvasMode: 'roi',
+        dicomMetadata: {
+          imagePositionPatient: position || null,
+          imageOrientationPatient: orientation || null,
+          rowPixelSpacing: rowSpacing,
+          columnPixelSpacing: colSpacing,
+          rows: cachedImage?.rows || cachedImage?.height || null,
+          columns: cachedImage?.columns || cachedImage?.width || null,
+        },
+        sourceCanvas: {
+          width: sourceWidth,
+          height: sourceHeight,
+          elementWidth,
+          elementHeight,
+        },
+        timestamp: Date.now(),
+      };
+
+      if ((window as any).__MEDEX_DEBUG_ROI_EXPORT) {
+        // eslint-disable-next-line no-console
+        console.info('[ROI Debug] Data captured. Access via window.__MEDEX_ROI_DEBUG_DATA');
+      }
+    }
+
     const roiWidth = width * scale;
     const roiHeight = height * scale;
     const startX = (PREVIEW_WIDTH - roiWidth) / 2;
@@ -881,6 +1785,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       ];
     };
 
+
     const contoursByEdit = [...filteredContours].sort((a, b) => {
       const timeA = a?.data?.modifiedAt || 0;
       const timeB = b?.data?.modifiedAt || 0;
@@ -969,6 +1874,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       overlayCtx.putImageData(overlayImageData, 0, 0);
       ctx.drawImage(overlayCanvas, startX, startY, roiWidth, roiHeight);
     }
+
 
     // Render MaskContour annotations as dashed outline
     const maskAnnotations =
@@ -1199,6 +2105,8 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     }
 
     setRoiPreviewUrl(previewCanvas.toDataURL('image/png'));
+    setPreviewMode('fast');
+    scheduleAccuratePreview();
   }, [
     roiAnnotation,
     activeViewportId,
@@ -1207,11 +2115,20 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     segmentationLabels,
     displaySetService,
     isRoiInActiveSeries,
+    scheduleAccuratePreview,
   ]);
 
   useEffect(() => {
     renderRoiPreview();
   }, [renderRoiPreview, roiRevision]);
+
+  useEffect(() => {
+    return () => {
+      if (accuratePreviewTimeoutRef.current) {
+        window.clearTimeout(accuratePreviewTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     buildRoiAnalysisData();
@@ -1267,6 +2184,16 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       toolGroupId: TOOL_GROUP_ID,
     });
   };
+
+  const exportDisabledReason = !hasAnalysisRoi
+    ? 'Define an ROI to export'
+    : 'Temporal ROI export is unavailable';
+  const hasTemporalFrames =
+    !!activeViewportId &&
+    !!cornerstoneViewportService &&
+    (cornerstoneViewportService.getCornerstoneViewport(activeViewportId)?.getImageIds?.()
+      ?.length ?? 0) > 0;
+  const canExportTemporalRoi = hasAnalysisRoi && hasTemporalFrames;
 
   return (
     <div className="flex w-full flex-col bg-black p-3 text-white">
@@ -1338,16 +2265,23 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
             </p>
           </div>
         )}
-        {segmentationPending ? (
-          <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
-            Segmentation pending
-          </div>
-        ) : null}
-        {showSpacingWarning ? (
-          <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
-            Pixel spacing missing, units in px
-          </div>
-        ) : null}
+        <div className="absolute bottom-2 right-2 flex flex-col items-end gap-1">
+          {hasPreview ? (
+            <div className="rounded bg-black/70 px-2 py-1 text-[9px] uppercase tracking-wide text-gray-300">
+              {previewMode === 'accurate' ? 'Accurate Preview' : 'Fast Preview'}
+            </div>
+          ) : null}
+          {segmentationPending ? (
+            <div className="rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
+              Segmentation pending
+            </div>
+          ) : null}
+          {showSpacingWarning ? (
+            <div className="rounded bg-black/70 px-2 py-1 text-[10px] text-gray-200">
+              Pixel spacing missing, units in px
+            </div>
+          ) : null}
+        </div>
         <div
           className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[11px] uppercase tracking-wide text-gray-300"
           style={{ writingMode: 'vertical-rl', transform: 'translateY(-50%) rotate(180deg)' }}
@@ -1360,6 +2294,43 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         >
           Cervix End
         </div>
+      </div>
+
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-[11px] text-gray-400">
+          <span>Temporal ROI Export</span>
+          <select
+            className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-200"
+            value={exportFormat}
+            onChange={evt => setExportFormat(evt.target.value as 'nifti' | 'nifti_gz' | 'tiff' | 'debug')}
+            disabled={!canExportTemporalRoi || isExporting}
+          >
+            <option value="nifti_gz">NIfTI (.nii.gz)</option>
+            <option value="nifti">NIfTI (.nii)</option>
+            <option value="tiff">TIFF (.tiff)</option>
+          </select>
+        </div>
+        <button
+          type="button"
+          className={`relative flex items-center justify-center overflow-hidden rounded border px-3 py-1 text-[11px] font-semibold ${
+            canExportTemporalRoi && !isExporting
+              ? 'border-orange-500 text-orange-400 hover:bg-orange-500/10'
+              : 'cursor-not-allowed border-gray-700 text-gray-500'
+          }`}
+          onClick={handleTemporalExport}
+          disabled={!canExportTemporalRoi || isExporting}
+          title={canExportTemporalRoi ? 'Export temporal ROI stack' : exportDisabledReason}
+        >
+          {isExporting ? (
+            <span
+              className="absolute inset-0 bg-orange-500/30"
+              style={{ width: `${exportProgress}%` }}
+            />
+          ) : null}
+          <span className="relative text-center">
+            {isExporting ? `Exporting ${exportProgress}%` : 'Export'}
+          </span>
+        </button>
       </div>
 
       {/* ROI Controls */}

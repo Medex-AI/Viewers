@@ -172,6 +172,7 @@ function modeFactory({ modeConfiguration }) {
 
       toolbarService.addButtons(toolbarButtons);
       toolbarService.createButtonSection('primary', [
+        'DebugProbe',
         'measurementSection',
         'Zoom',
         'WindowLevel',

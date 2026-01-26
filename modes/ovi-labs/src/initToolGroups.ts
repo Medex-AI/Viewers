@@ -15,6 +15,7 @@ function initToolGroups(extensionManager, toolGroupService) {
       { toolName: toolNames.Length },
       { toolName: toolNames.Bidirectional },
       { toolName: toolNames.Probe },
+      { toolName: toolNames.DebugProbe },
       { toolName: toolNames.EllipticalROI },
       { toolName: toolNames.CircleROI },
       { toolName: toolNames.RectangleROI },
