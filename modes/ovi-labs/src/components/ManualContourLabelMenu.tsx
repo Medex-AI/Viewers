@@ -12,7 +12,7 @@ const SEGMENTATION_COLORS: Record<string, string> = {
   uterineCavity: '#22D3EE',
   endometrium: '#F472B6',
   myometrium: '#FBBF24',
-  cervixCavity: '#60A5FA',
+  junctionalZone: '#60A5FA',
 };
 
 const ManualContourLabelMenu: React.FC<ManualContourLabelMenuProps> = ({

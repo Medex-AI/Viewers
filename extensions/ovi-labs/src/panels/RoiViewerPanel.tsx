@@ -313,9 +313,14 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const unsubscribe = subscribeSegmentationState(state => {
       setSegmentationModelLocal(state.activeModel);
       setSegmentationLabels(state.labels);
+      // Trigger preview re-render by incrementing revision
+      // This will cause renderRoiPreview to run, which calls scheduleAccuratePreview
+      if (roiAnnotation) {
+        setRoiRevision(prev => prev + 1);
+      }
     });
     return unsubscribe;
-  }, []);
+  }, [roiAnnotation]);
 
   const handleSegmentationModelChange = (model: string) => {
     setActiveModel(model as ModelType);
@@ -954,6 +959,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const roiCanvas = document.createElement('canvas');
     roiCanvas.width = Math.max(1, Math.round(roiWidth));
     roiCanvas.height = Math.max(1, Math.round(roiHeight));
+    console.log('[Overlay Debug] roiCanvas dimensions:', roiCanvas.width, 'x', roiCanvas.height);
     const roiCtx = roiCanvas.getContext('2d');
     if (!roiCtx) {
       return;
@@ -1010,7 +1016,363 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const startY = (PREVIEW_HEIGHT - scaledHeight) / 2;
 
     // Draw scaled ROI onto preview canvas
+    console.log('[Overlay Debug] Drawing ROI image at', startX, startY, 'with display size:', scaledWidth, 'x', scaledHeight);
     ctx.drawImage(roiCanvas, startX, startY, scaledWidth, scaledHeight);
+
+    // === Overlay Rendering: Manual Contour Segmentation Masks ===
+    // Get viewport information needed for coordinate transformation
+    const viewportInfo = cornerstoneViewportService.getViewportInfo?.(activeViewportId);
+    const element = viewportInfo?.element;
+    const sourceCanvas = element?.querySelector('canvas');
+
+    console.log('[Overlay Debug] element:', element, 'sourceCanvas:', sourceCanvas);
+
+    if (element && sourceCanvas) {
+      // Get ROI annotation points and calculate geometry using worldToIndex (same as buildTemporalRoiStack)
+      const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
+
+      if (points.length === 4) {
+        // Use the same worldToIndex transformation as buildTemporalRoiStack
+        const getWorldToIndex = () => {
+          if (viewport.worldToIndex) {
+            return (point: number[]) => viewport.worldToIndex(point);
+          }
+
+          // Fallback: calculate worldToIndex from DICOM metadata (same as buildTemporalRoiStack)
+          const imagePlane = metaData.get('imagePlaneModule', imageId);
+          const orientation = imagePlane?.imageOrientationPatient;
+          const position = imagePlane?.imagePositionPatient;
+          const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+          const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+          if (!orientation || !position) {
+            return null;
+          }
+
+          const rowCosines = [orientation[0], orientation[1], orientation[2]];
+          const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+          return (point: number[]) => {
+            const dx = point[0] - position[0];
+            const dy = point[1] - position[1];
+            const dz = point[2] - position[2];
+            const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+            const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+            return [col, row, 0];
+          };
+        };
+
+        const worldToIndex = getWorldToIndex();
+        if (!worldToIndex) {
+          console.warn('[Overlay Debug] worldToIndex not available, skipping overlay');
+          return;
+        }
+        console.log('[Overlay Debug] worldToIndex successfully created');
+
+        // Transform ROI corner points to index space and stabilize ordering (same as buildTemporalRoiStack)
+        const indexedPoints = points.map(point => ({
+          world: point,
+          index: worldToIndex(point),
+          canvas: viewport.worldToCanvas ? viewport.worldToCanvas(point) : null,
+        }));
+        if (indexedPoints.some(point => !point.index || point.index.length < 2)) {
+          console.warn('[Overlay Debug] index points missing, skipping overlay');
+          return;
+        }
+        if (indexedPoints.some(point => !point.canvas || point.canvas.length < 2)) {
+          console.warn('[Overlay Debug] canvas points missing, skipping overlay');
+          return;
+        }
+
+        const canvasCenter = indexedPoints.reduce(
+          (acc, point) => {
+            acc[0] += point.canvas![0];
+            acc[1] += point.canvas![1];
+            return acc;
+          },
+          [0, 0]
+        );
+        canvasCenter[0] /= indexedPoints.length;
+        canvasCenter[1] /= indexedPoints.length;
+
+        const ordered = {
+          topLeft: null as typeof indexedPoints[number] | null,
+          topRight: null as typeof indexedPoints[number] | null,
+          bottomLeft: null as typeof indexedPoints[number] | null,
+          bottomRight: null as typeof indexedPoints[number] | null,
+        };
+
+        indexedPoints.forEach(point => {
+          const dx = point.canvas![0] - canvasCenter[0];
+          const dy = point.canvas![1] - canvasCenter[1];
+          if (dx <= 0 && dy <= 0) {
+            ordered.topLeft = point;
+          } else if (dx > 0 && dy <= 0) {
+            ordered.topRight = point;
+          } else if (dx <= 0 && dy > 0) {
+            ordered.bottomLeft = point;
+          } else {
+            ordered.bottomRight = point;
+          }
+        });
+
+        if (!ordered.topLeft || !ordered.topRight || !ordered.bottomLeft || !ordered.bottomRight) {
+          console.warn('[Overlay Debug] could not order ROI points, skipping overlay');
+          return;
+        }
+
+        let bottomLeft = ordered.bottomLeft.index!;
+        let bottomRight = ordered.bottomRight.index!;
+        let topLeft = ordered.topLeft.index!;
+
+        const indexTopLeft = ordered.topLeft.index!;
+        const indexTopRight = ordered.topRight.index!;
+        const indexBottomLeft = ordered.bottomLeft.index!;
+        const indexDeltaX = [
+          indexTopRight[0] - indexTopLeft[0],
+          indexTopRight[1] - indexTopLeft[1],
+        ];
+        const indexDeltaY = [
+          indexBottomLeft[0] - indexTopLeft[0],
+          indexBottomLeft[1] - indexTopLeft[1],
+        ];
+        const xAxisIsCol = Math.abs(indexDeltaX[0]) >= Math.abs(indexDeltaX[1]);
+        const yAxisIsRow = Math.abs(indexDeltaY[1]) >= Math.abs(indexDeltaY[0]);
+        const shouldSwapIndexAxes = !xAxisIsCol && !yAxisIsRow;
+        if (shouldSwapIndexAxes) {
+          const swapAxis = (point: number[]) => [point[1], point[0], point[2]];
+          bottomLeft = swapAxis(bottomLeft);
+          bottomRight = swapAxis(bottomRight);
+          topLeft = swapAxis(topLeft);
+        }
+
+        // Calculate ROI geometry in index space
+        const widthVec = [
+          bottomRight[0] - bottomLeft[0],
+          bottomRight[1] - bottomLeft[1],
+        ];
+        const heightVec = [
+          topLeft[0] - bottomLeft[0],
+          topLeft[1] - bottomLeft[1],
+        ];
+
+        const widthLength = Math.hypot(widthVec[0], widthVec[1]);
+        const heightLength = Math.hypot(heightVec[0], heightVec[1]);
+
+        // Coordinate transformation function: world → index → ROI local coords
+        const worldToRoiLocal = (worldPoint: number[]) => {
+          const indexPoint = worldToIndex(worldPoint);
+          // Express point relative to bottomLeft corner, in terms of width/height vectors
+          const dx = indexPoint[0] - bottomLeft[0];
+          const dy = indexPoint[1] - bottomLeft[1];
+
+          // Project onto width and height vectors
+          const u = (dx * widthVec[0] + dy * widthVec[1]) / (widthLength * widthLength);
+          const v = (dx * heightVec[0] + dy * heightVec[1]) / (heightLength * heightLength);
+
+          return [u * widthLength, v * heightLength];
+        };
+
+        // Create overlay data structures - must match ROI canvas dimensions
+        const roiMaskWidth = Math.max(1, Math.round(roiWidth));
+        const roiMaskHeight = Math.max(1, Math.round(roiHeight));
+        console.log('[Overlay Debug] roiWidth:', roiWidth, 'roiHeight:', roiHeight);
+        console.log('[Overlay Debug] Creating overlay of size:', roiMaskWidth, 'x', roiMaskHeight);
+        const maskData = new Uint8Array(roiMaskWidth * roiMaskHeight);
+        const overlayImageData = ctx.createImageData(roiMaskWidth, roiMaskHeight);
+
+        // Build label maps
+        const labelIdToIndex = new Map<string, number>();
+        const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> = {};
+        SEGMENTATION_LABELS.forEach((label, index) => {
+          const labelIndex = index + 1;
+          labelIdToIndex.set(label.id, labelIndex);
+          labelMap[labelIndex] = {
+            labelId: label.id,
+            labelName: label.name,
+            labelColor: label.color,
+          };
+        });
+
+        // Get label state from segmentation store
+        const labelStateMap = new Map();
+        console.log('[Overlay Debug] segmentationLabels:', segmentationLabels);
+        segmentationLabels.forEach(label => {
+          labelStateMap.set(label.id, {
+            visible: label.visible,
+            opacity: label.opacity,
+            color: label.color,
+          });
+        });
+        console.log('[Overlay Debug] labelStateMap after population:', Array.from(labelStateMap.entries()));
+
+        // Get manual contour annotations for current frame
+        const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
+        const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
+        const displaySet = displaySetInstanceUID
+          ? displaySetService?.getDisplaySetByUID?.(displaySetInstanceUID)
+          : undefined;
+        const seriesInstanceUID = displaySet?.SeriesInstanceUID;
+        const currentIndex = viewport.getCurrentImageIdIndex?.();
+        const currentFrameNumber = typeof currentIndex === 'number' ? currentIndex + 1 : undefined;
+
+        const contourAnnotations = annotation.state.getAnnotations(MANUAL_CONTOUR_TOOL, element as HTMLElement) || [];
+
+        console.log('[Overlay Debug] contourAnnotations:', contourAnnotations.length);
+
+        const filteredContours = contourAnnotations.filter(contour => {
+          const contourModelType = contour?.data?.modelType || 'manual';
+          if (contourModelType !== segmentationModel) {
+            return false;
+          }
+
+          if (seriesInstanceUID && contour?.data?.seriesInstanceUID) {
+            if (contour.data.seriesInstanceUID !== seriesInstanceUID) {
+              return false;
+            }
+          }
+
+          if (imageId && contour?.metadata?.referencedImageId) {
+            return contour.metadata.referencedImageId === imageId;
+          }
+
+          const frameNumber = contour?.data?.frameNumber || contour?.metadata?.frameNumber;
+          if (currentFrameNumber && frameNumber) {
+            return frameNumber === currentFrameNumber;
+          }
+
+          return false;
+        });
+
+        // Sort contours by edit time (last-edited-wins for overlaps)
+        const contoursByEdit = [...filteredContours].sort((a, b) => {
+          const timeA = a?.data?.modifiedAt || 0;
+          const timeB = b?.data?.modifiedAt || 0;
+          return timeA - timeB;
+        });
+
+        console.log('[Overlay Debug] filteredContours:', filteredContours.length, 'contoursByEdit:', contoursByEdit.length);
+        console.log('[Overlay Debug] roiMaskWidth:', roiMaskWidth, 'roiMaskHeight:', roiMaskHeight);
+        console.log('[Overlay Debug] scale:', scale, 'scaledWidth:', scaledWidth, 'scaledHeight:', scaledHeight);
+        console.log('[Overlay Debug] startX:', startX, 'startY:', startY);
+
+        // Rasterize contours into mask data
+        let totalPixelsRasterized = 0;
+        contoursByEdit.forEach(contour => {
+          const polyline = contour?.data?.contour?.polyline || contour?.data?.handles?.points;
+          if (!polyline || polyline.length < 3) {
+            console.log('[Overlay Debug] Skipping contour - invalid polyline');
+            return;
+          }
+
+          const labelId = contour?.data?.labelId;
+          const labelIndex = labelId ? labelIdToIndex.get(labelId) : undefined;
+          if (!labelIndex) {
+            console.log('[Overlay Debug] Skipping contour - no labelIndex for labelId:', labelId);
+            return;
+          }
+          console.log('[Overlay Debug] Processing contour - labelId:', labelId, 'labelIndex:', labelIndex, 'points:', polyline.length);
+
+          // Transform polygon to ROI mask space using worldToRoiLocal
+          const polygon = polyline.map(point => {
+            const [localX, localY] = worldToRoiLocal(point);
+            // localX is in [0, widthLength], localY is in [0, heightLength]
+            // Scale to mask resolution
+            return [
+              (localX / widthLength) * roiMaskWidth,
+              (localY / heightLength) * roiMaskHeight,
+            ];
+          });
+
+          console.log('[Overlay Debug] First 3 polygon points:', polygon.slice(0, 3));
+          console.log('[Overlay Debug] widthLength:', widthLength, 'heightLength:', heightLength);
+          console.log('[Overlay Debug] Bounding box will be checked against roiMask bounds [0-' + roiMaskWidth + ', 0-' + roiMaskHeight + ']');
+
+          // Get bounding box for optimization
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const [x, y] of polygon) {
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+          }
+
+          const startXPixel = Math.max(0, Math.floor(minX));
+          const endXPixel = Math.min(roiMaskWidth - 1, Math.ceil(maxX));
+          const startYPixel = Math.max(0, Math.floor(minY));
+          const endYPixel = Math.min(roiMaskHeight - 1, Math.ceil(maxY));
+
+          console.log('[Overlay Debug] Polygon bbox: [' + minX + '-' + maxX + ', ' + minY + '-' + maxY + ']');
+          console.log('[Overlay Debug] Clamped pixel range: [' + startXPixel + '-' + endXPixel + ', ' + startYPixel + '-' + endYPixel + ']');
+
+          // Rasterize polygon using point-in-polygon test
+          let pixelsInThisContour = 0;
+          for (let y = startYPixel; y <= endYPixel; y += 1) {
+            for (let x = startXPixel; x <= endXPixel; x += 1) {
+              if (isPointInPolygon([x + 0.5, y + 0.5], polygon)) {
+                maskData[y * roiMaskWidth + x] = labelIndex;
+                pixelsInThisContour++;
+                totalPixelsRasterized++;
+              }
+            }
+          }
+          console.log('[Overlay Debug] Rasterized', pixelsInThisContour, 'pixels for this contour');
+        });
+
+        console.log('[Overlay Debug] Total pixels rasterized:', totalPixelsRasterized);
+
+        // Apply colors to overlay based on label visibility and opacity
+        const overlayData = overlayImageData.data;
+        let coloredPixels = 0;
+        let skippedInvisible = 0;
+        for (let i = 0; i < maskData.length; i += 1) {
+          const labelIndex = maskData[i];
+          if (!labelIndex) {
+            continue;
+          }
+
+          const labelInfo = labelMap[labelIndex];
+          if (!labelInfo) {
+            continue;
+          }
+
+          const labelState = labelStateMap.get(labelInfo.labelId);
+          if (labelState && !labelState.visible) {
+            skippedInvisible++;
+            continue;
+          }
+
+          const color = labelState?.color || labelInfo.labelColor;
+          const opacity = labelState?.opacity ?? 0.3;
+          const [r, g, b] = hexToRgb(color);
+          const alpha = Math.round(opacity * 255);
+          const dataIndex = i * 4;
+          overlayData[dataIndex] = r;
+          overlayData[dataIndex + 1] = g;
+          overlayData[dataIndex + 2] = b;
+          overlayData[dataIndex + 3] = alpha;
+          coloredPixels++;
+        }
+
+        console.log('[Overlay Debug] Colored pixels:', coloredPixels, 'Skipped invisible:', skippedInvisible);
+        console.log('[Overlay Debug] Label state map:', Array.from(labelStateMap.entries()));
+
+        // Composite overlay onto preview canvas
+        const overlayCanvas = document.createElement('canvas');
+        overlayCanvas.width = roiMaskWidth;
+        overlayCanvas.height = roiMaskHeight;
+        const overlayCtx = overlayCanvas.getContext('2d');
+        if (overlayCtx) {
+          overlayCtx.putImageData(overlayImageData, 0, 0);
+          console.log('[Overlay Debug] overlayCanvas dimensions:', overlayCanvas.width, 'x', overlayCanvas.height);
+          console.log('[Overlay Debug] Drawing overlay at', startX, startY, 'with display size:', scaledWidth, 'x', scaledHeight);
+          console.log('[Overlay Debug] This should match ROI image which is drawn at same position/size');
+          ctx.drawImage(overlayCanvas, startX, startY, scaledWidth, scaledHeight);
+          console.log('[Overlay Debug] Overlay drawn successfully');
+        }
+      }
+    }
+    // === End Overlay Rendering ===
 
     // Apply dark mask outside ROI region
     ctx.fillStyle = '#111827';
@@ -1018,6 +1380,147 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     ctx.rect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
     ctx.rect(startX, startY, scaledWidth, scaledHeight);
     ctx.fill('evenodd');
+
+    // === Mask Contour Rendering with Soft Dimming ===
+    if (element && sourceCanvas) {
+      const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
+
+      if (points.length === 4) {
+        // Reuse geometry calculations from overlay rendering
+        const elementWidth = element.clientWidth || 0;
+        const elementHeight = element.clientHeight || 0;
+        const sourceWidth = sourceCanvas.width;
+        const sourceHeight = sourceCanvas.height;
+        const scaleX = elementWidth > 0 && sourceWidth > 0 ? sourceWidth / elementWidth : 1;
+        const scaleY = elementHeight > 0 && sourceHeight > 0 ? sourceHeight / elementHeight : 1;
+        const needsNormalization = (scaleX > 1.01 || scaleY > 1.01) && (elementWidth > 0 && elementHeight > 0);
+
+        const canvasPoints = points.map(point => viewport.worldToCanvas(point));
+        const bottomLeft = canvasPoints[0];
+        const bottomRight = canvasPoints[1];
+        const topRight = canvasPoints[2];
+
+        const angle = Math.atan2(bottomRight[1] - bottomLeft[1], bottomRight[0] - bottomLeft[0]);
+        const center = [(bottomLeft[0] + topRight[0]) / 2, (bottomLeft[1] + topRight[1]) / 2];
+
+        const normalizeCanvasPoint = (worldPoint: number[]) => {
+          const canvasPoint = viewport.worldToCanvas(worldPoint);
+          if (!needsNormalization) {
+            return canvasPoint;
+          }
+          return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
+        };
+
+        const cosAngle = Math.cos(-angle);
+        const sinAngle = Math.sin(-angle);
+
+        const toPreviewPoint = (canvasPoint: number[]) => {
+          const dx = canvasPoint[0] - center[0];
+          const dy = canvasPoint[1] - center[1];
+          const rotatedX = dx * cosAngle - dy * sinAngle;
+          const rotatedY = dx * sinAngle + dy * cosAngle;
+          return [
+            rotatedX * scale + PREVIEW_WIDTH / 2,
+            rotatedY * scale + PREVIEW_HEIGHT / 2,
+          ];
+        };
+
+        // Get mask contour annotations
+        const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
+        const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
+        const displaySet = displaySetInstanceUID
+          ? displaySetService?.getDisplaySetByUID?.(displaySetInstanceUID)
+          : undefined;
+        const seriesInstanceUID = displaySet?.SeriesInstanceUID;
+        const currentIndex = viewport.getCurrentImageIdIndex?.();
+        const currentFrameNumber = typeof currentIndex === 'number' ? currentIndex + 1 : undefined;
+
+        const maskAnnotations = annotation.state.getAnnotations(MASK_CONTOUR_TOOL, element as HTMLElement) || [];
+        const filteredMasks = maskAnnotations.filter(mask => {
+          if (seriesInstanceUID && mask?.data?.seriesInstanceUID) {
+            if (mask.data.seriesInstanceUID !== seriesInstanceUID) {
+              return false;
+            }
+          }
+
+          if (imageId && mask?.metadata?.referencedImageId) {
+            return mask.metadata.referencedImageId === imageId;
+          }
+
+          const frameNumber = mask?.data?.frameNumber || mask?.metadata?.frameNumber;
+          if (currentFrameNumber && frameNumber) {
+            return frameNumber === currentFrameNumber;
+          }
+
+          return false;
+        });
+
+        if (filteredMasks.length > 0) {
+          // Create binary mask for distance field calculation
+          const previewWidth = Math.round(PREVIEW_WIDTH);
+          const previewHeight = Math.round(PREVIEW_HEIGHT);
+          const maskBitmap = new Uint8Array(previewWidth * previewHeight);
+
+          // Rasterize all mask contours into binary mask
+          filteredMasks.forEach(mask => {
+            const polyline = mask?.data?.contour?.polyline || mask?.data?.handles?.points;
+            if (!polyline || polyline.length < 3) {
+              return;
+            }
+
+            // Transform contour points to preview canvas space
+            const previewPoints = polyline.map(point => {
+              const canvasPoint = normalizeCanvasPoint(point);
+              return toPreviewPoint(canvasPoint);
+            });
+
+            // Draw mask contour as dashed outline first
+            ctx.save();
+            ctx.strokeStyle = MASK_CONTOUR_COLOR;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            previewPoints.forEach((point, index) => {
+              if (index === 0) {
+                ctx.moveTo(point[0], point[1]);
+              } else {
+                ctx.lineTo(point[0], point[1]);
+              }
+            });
+            ctx.closePath();
+            ctx.stroke();
+            ctx.restore();
+
+            // Rasterize polygon into binary mask
+            // Get bounding box
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const [x, y] of previewPoints) {
+              minX = Math.min(minX, x);
+              minY = Math.min(minY, y);
+              maxX = Math.max(maxX, x);
+              maxY = Math.max(maxY, y);
+            }
+
+            const startXPixel = Math.max(0, Math.floor(minX));
+            const endXPixel = Math.min(previewWidth - 1, Math.ceil(maxX));
+            const startYPixel = Math.max(0, Math.floor(minY));
+            const endYPixel = Math.min(previewHeight - 1, Math.ceil(maxY));
+
+            // Rasterize using point-in-polygon
+            for (let y = startYPixel; y <= endYPixel; y += 1) {
+              for (let x = startXPixel; x <= endXPixel; x += 1) {
+                if (isPointInPolygon([x + 0.5, y + 0.5], previewPoints)) {
+                  maskBitmap[y * previewWidth + x] = 1;
+                }
+              }
+            }
+          });
+
+          // Dimming disabled to avoid expensive distance-field computation.
+        }
+      }
+    }
+    // === End Mask Contour Rendering ===
 
     // Draw orange border
     ctx.strokeStyle = MEDEX_ORANGE;
@@ -1512,6 +2015,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const scaleY =
       elementHeight > 0 && sourceHeight > 0 ? sourceHeight / elementHeight : 1;
 
+    let shouldNormalizeCanvasPoints = false;
     let canvasPoints = points.map(point => viewport.worldToCanvas(point));
     if (scaleX > 1.01 || scaleY > 1.01) {
       const maxX = Math.max(...canvasPoints.map(point => point[0]));
@@ -1521,6 +2025,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         (elementHeight > 0 && maxY > elementHeight * 1.2);
 
       if (needsNormalization) {
+        shouldNormalizeCanvasPoints = true;
         canvasPoints = canvasPoints.map(point => [point[0] / scaleX, point[1] / scaleY]);
       }
     }
@@ -1762,13 +2267,9 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
 
     const cosAngle = Math.cos(-angle);
     const sinAngle = Math.sin(-angle);
-    const needsNormalization =
-      (scaleX > 1.01 || scaleY > 1.01) &&
-      (elementWidth > 0 && elementHeight > 0);
-
     const normalizeCanvasPoint = (worldPoint: number[]) => {
       const canvasPoint = viewport.worldToCanvas(worldPoint);
-      if (!needsNormalization) {
+      if (!shouldNormalizeCanvasPoints) {
         return canvasPoint;
       }
       return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
@@ -1807,9 +2308,10 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       const polygon = polyline.map(point => {
         const canvasPoint = normalizeCanvasPoint(point);
         const previewPoint = toPreviewPoint(canvasPoint);
+        // Convert from preview coords to ROI mask coords
         return [
-          (previewPoint[0] - startX) * roiScaleX,
-          (previewPoint[1] - startY) * roiScaleY,
+          ((previewPoint[0] - startX) / roiWidth) * roiMaskWidth,
+          ((previewPoint[1] - startY) / roiHeight) * roiMaskHeight,
         ];
       });
 
@@ -1872,6 +2374,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const overlayCtx = overlayCanvas.getContext('2d');
     if (overlayCtx) {
       overlayCtx.putImageData(overlayImageData, 0, 0);
+      // Draw overlay at the same position and size as the ROI image
       ctx.drawImage(overlayCanvas, startX, startY, roiWidth, roiHeight);
     }
 

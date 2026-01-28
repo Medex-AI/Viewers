@@ -14,7 +14,7 @@ const LABELS = [
   { id: 'uterineCavity', label: 'Uterine cavity', color: '#22D3EE' },
   { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
   { id: 'myometrium', label: 'Myometrium', color: '#FBBF24' },
-  { id: 'cervixCavity', label: 'Cervix cavity', color: '#60A5FA' },
+  { id: 'junctionalZone', label: 'Junctional zone', color: '#60A5FA' },
 ];
 
 let activeLabelId = LABELS[0].id;

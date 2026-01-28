@@ -13,7 +13,7 @@ export const SEGMENTATION_LABELS = [
   { id: 'uterineCavity', name: 'Uterine cavity', color: '#22D3EE' },
   { id: 'endometrium', name: 'Endometrium', color: '#F472B6' },
   { id: 'myometrium', name: 'Myometrium', color: '#FBBF24' },
-  { id: 'cervixCavity', name: 'Cervix cavity', color: '#60A5FA' },
+  { id: 'junctionalZone', name: 'Junctional zone', color: '#60A5FA' },
 ] as const;
 
 export type ModelType = 'manual' | 'threshold' | 'medsam' | 'unet_uterine';
