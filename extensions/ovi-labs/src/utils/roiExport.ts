@@ -262,3 +262,122 @@ export const gzipBuffer = async (
 
   return result.buffer;
 };
+
+const crc32Table = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let j = 0; j < 8; j += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+const toUint8Array = (input: ArrayBuffer | Uint8Array): Uint8Array =>
+  input instanceof Uint8Array ? input : new Uint8Array(input);
+
+const getCrc32 = (data: Uint8Array): number => {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i += 1) {
+    crc = crc32Table[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const encodeUtf8 = (value: string): Uint8Array => new TextEncoder().encode(value);
+
+export const buildZipBuffer = (
+  files: { name: string; data: ArrayBuffer | Uint8Array }[]
+): ArrayBuffer => {
+  const normalized = files.map(file => {
+    const nameBytes = encodeUtf8(file.name);
+    const dataBytes = toUint8Array(file.data);
+    const crc32 = getCrc32(dataBytes);
+    return {
+      name: file.name,
+      nameBytes,
+      dataBytes,
+      crc32,
+      compressedSize: dataBytes.length,
+      uncompressedSize: dataBytes.length,
+    };
+  });
+
+  const localHeadersSize = normalized.reduce(
+    (sum, file) => sum + 30 + file.nameBytes.length + file.dataBytes.length,
+    0
+  );
+  const centralDirectorySize = normalized.reduce(
+    (sum, file) => sum + 46 + file.nameBytes.length,
+    0
+  );
+  const endOfCentralDirectorySize = 22;
+  const totalSize = localHeadersSize + centralDirectorySize + endOfCentralDirectorySize;
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  const out = new Uint8Array(buffer);
+
+  let offset = 0;
+  const localHeaderOffsets: number[] = [];
+
+  normalized.forEach(file => {
+    localHeaderOffsets.push(offset);
+    view.setUint32(offset, 0x04034b50, true);
+    view.setUint16(offset + 4, 20, true);
+    view.setUint16(offset + 6, 0, true);
+    view.setUint16(offset + 8, 0, true);
+    view.setUint16(offset + 10, 0, true);
+    view.setUint16(offset + 12, 0, true);
+    view.setUint32(offset + 14, file.crc32, true);
+    view.setUint32(offset + 18, file.compressedSize, true);
+    view.setUint32(offset + 22, file.uncompressedSize, true);
+    view.setUint16(offset + 26, file.nameBytes.length, true);
+    view.setUint16(offset + 28, 0, true);
+    offset += 30;
+
+    out.set(file.nameBytes, offset);
+    offset += file.nameBytes.length;
+
+    out.set(file.dataBytes, offset);
+    offset += file.dataBytes.length;
+  });
+
+  const centralDirectoryOffset = offset;
+
+  normalized.forEach((file, index) => {
+    view.setUint32(offset, 0x02014b50, true);
+    view.setUint16(offset + 4, 20, true);
+    view.setUint16(offset + 6, 20, true);
+    view.setUint16(offset + 8, 0, true);
+    view.setUint16(offset + 10, 0, true);
+    view.setUint16(offset + 12, 0, true);
+    view.setUint16(offset + 14, 0, true);
+    view.setUint32(offset + 16, file.crc32, true);
+    view.setUint32(offset + 20, file.compressedSize, true);
+    view.setUint32(offset + 24, file.uncompressedSize, true);
+    view.setUint16(offset + 28, file.nameBytes.length, true);
+    view.setUint16(offset + 30, 0, true);
+    view.setUint16(offset + 32, 0, true);
+    view.setUint16(offset + 34, 0, true);
+    view.setUint16(offset + 36, 0, true);
+    view.setUint32(offset + 38, 0, true);
+    view.setUint32(offset + 42, localHeaderOffsets[index], true);
+    offset += 46;
+
+    out.set(file.nameBytes, offset);
+    offset += file.nameBytes.length;
+  });
+
+  view.setUint32(offset, 0x06054b50, true);
+  view.setUint16(offset + 4, 0, true);
+  view.setUint16(offset + 6, 0, true);
+  view.setUint16(offset + 8, normalized.length, true);
+  view.setUint16(offset + 10, normalized.length, true);
+  view.setUint32(offset + 12, centralDirectorySize, true);
+  view.setUint32(offset + 16, centralDirectoryOffset, true);
+  view.setUint16(offset + 20, 0, true);
+
+  return buffer;
+};

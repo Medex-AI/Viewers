@@ -30,6 +30,7 @@ import { setRoiSegmentationFrame } from '../utils/roiSegmentationStore';
 import {
   buildNiftiBuffer,
   buildTiffBuffer,
+  buildZipBuffer,
   downloadBlob,
   gzipBuffer,
   requestSaveHandle,
@@ -52,6 +53,8 @@ const MAX_ANALYSIS_SAMPLES = 256;
 const MANUAL_CONTOUR_TOOL = 'ManualContour';
 const MASK_CONTOUR_TOOL = 'MaskContour';
 const MASK_CONTOUR_COLOR = '#94A3B8';
+const MASK_CONTOUR_LINE_WIDTH = 4;
+const PREVIEW_GRID_LABEL_FONT_SIZE = 28;
 
 const hexToRgb = (hex: string): [number, number, number] => {
   const normalized = hex.replace('#', '');
@@ -897,6 +900,17 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       height: outputHeight,
       spacing,
       frameTimeMs: frameTiming.frameTimeMs,
+      geometry: {
+        bottomLeft,
+        bottomRight,
+        topLeft,
+        widthVec,
+        heightVec,
+        widthLength,
+        heightLength,
+        shouldSwapIndexAxes,
+        referenceImageId: limitedImageIds[0], // Store which imageId was used for metadata
+      },
     };
   }, [
     roiAnnotation,
@@ -904,6 +918,256 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     cornerstoneViewportService,
     roiPreviewSettings,
   ]);
+
+  const buildTemporalSegmentationStacks = useCallback(
+    (
+      stack: {
+        imageIds: string[];
+        width: number;
+        height: number;
+        geometry?: {
+          topLeft: number[];
+          widthVec: number[];
+          heightVec: number[];
+          widthLength: number;
+          heightLength: number;
+          shouldSwapIndexAxes?: boolean;
+          referenceImageId: string;
+        };
+      }
+    ) => {
+      if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService || !stack?.geometry) {
+        return null;
+      }
+
+      const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+      if (!viewport) {
+        return null;
+      }
+
+      const { imageIds, width, height, geometry } = stack;
+      const frameCount = imageIds.length;
+      if (!frameCount || width <= 0 || height <= 0) {
+        return null;
+      }
+
+      const getWorldToIndex = () => {
+        if (viewport.worldToIndex) {
+          return (point: number[]) => viewport.worldToIndex(point);
+        }
+
+        const imagePlane = metaData.get('imagePlaneModule', geometry.referenceImageId);
+        const orientation = imagePlane?.imageOrientationPatient;
+        const position = imagePlane?.imagePositionPatient;
+        const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+        const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+        if (!orientation || !position) {
+          return null;
+        }
+
+        const rowCosines = [orientation[0], orientation[1], orientation[2]];
+        const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+        return (point: number[]) => {
+          const dx = point[0] - position[0];
+          const dy = point[1] - position[1];
+          const dz = point[2] - position[2];
+          const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+          const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+          return [col, row, 0];
+        };
+      };
+
+      const worldToIndex = getWorldToIndex();
+      if (!worldToIndex) {
+        return null;
+      }
+
+      const { topLeft, widthVec, heightVec, widthLength, heightLength, shouldSwapIndexAxes } = geometry;
+      const downVecX = -heightVec[0];
+      const downVecY = -heightVec[1];
+      const det = widthVec[0] * downVecY - widthVec[1] * downVecX;
+      if (Math.abs(det) < 1e-6 || widthLength <= 0 || heightLength <= 0) {
+        return null;
+      }
+
+      const frameIndexByImageId = new Map<string, number>();
+      imageIds.forEach((id, index) => frameIndexByImageId.set(id, index));
+
+      const resolveFrameIndex = (item: any): number => {
+        const referencedImageId = item?.metadata?.referencedImageId;
+        if (referencedImageId && frameIndexByImageId.has(referencedImageId)) {
+          return frameIndexByImageId.get(referencedImageId)!;
+        }
+
+        const frameNumber = item?.data?.frameNumber || item?.metadata?.frameNumber;
+        if (
+          typeof frameNumber === 'number' &&
+          Number.isFinite(frameNumber) &&
+          frameNumber >= 1 &&
+          frameNumber <= frameCount
+        ) {
+          return frameNumber - 1;
+        }
+
+        return -1;
+      };
+
+      const worldToMaskPoint = (worldPoint: number[]): [number, number] | null => {
+        const rawIndexPoint = worldToIndex(worldPoint);
+        const indexPoint = shouldSwapIndexAxes
+          ? [rawIndexPoint[1], rawIndexPoint[0], rawIndexPoint[2]]
+          : rawIndexPoint;
+        const relX = indexPoint[0] - topLeft[0];
+        const relY = indexPoint[1] - topLeft[1];
+        const u = (relX * downVecY - relY * downVecX) / det;
+        const v = (widthVec[0] * relY - widthVec[1] * relX) / det;
+        if (!Number.isFinite(u) || !Number.isFinite(v)) {
+          return null;
+        }
+        return [u * width, v * height];
+      };
+
+      const rasterizePolygon = (targetFrame: Uint8Array, polygon: [number, number][], value: number) => {
+        if (!polygon.length) {
+          return;
+        }
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        for (const [x, y] of polygon) {
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+        }
+
+        const startXPixel = Math.max(0, Math.floor(minX));
+        const endXPixel = Math.min(width - 1, Math.ceil(maxX));
+        const startYPixel = Math.max(0, Math.floor(minY));
+        const endYPixel = Math.min(height - 1, Math.ceil(maxY));
+
+        for (let y = startYPixel; y <= endYPixel; y += 1) {
+          for (let x = startXPixel; x <= endXPixel; x += 1) {
+            if (isPointInPolygon([x + 0.5, y + 0.5], polygon as number[][])) {
+              targetFrame[y * width + x] = value;
+            }
+          }
+        }
+      };
+
+      const annotationManager = annotation.state.getAnnotationManager();
+      if (!annotationManager?.getFramesOfReference) {
+        return null;
+      }
+
+      const frameOfReferenceUID = roiAnnotation?.metadata?.FrameOfReferenceUID || roiAnnotation?.data?.FrameOfReferenceUID;
+      const collectAnnotations = (toolName: string) => {
+        if (frameOfReferenceUID) {
+          return annotationManager.getAnnotations(frameOfReferenceUID, toolName) || [];
+        }
+        const all: any[] = [];
+        const framesOfReference = annotationManager.getFramesOfReference() || [];
+        framesOfReference.forEach(frame => {
+          const items = annotationManager.getAnnotations(frame, toolName) || [];
+          all.push(...items);
+        });
+        return all;
+      };
+
+      const firstInstance = imageIds[0] ? metaData.get('instance', imageIds[0]) : null;
+      const seriesInstanceUID = firstInstance?.SeriesInstanceUID;
+      const frameLabelMasks = Array.from({ length: frameCount }, () => new Uint8Array(width * height));
+      const frameBinaryMasks = Array.from({ length: frameCount }, () => new Uint8Array(width * height));
+
+      const labelIdToIndex = new Map<string, number>();
+      SEGMENTATION_LABELS.forEach((label, index) => {
+        labelIdToIndex.set(label.id, index + 1);
+      });
+
+      const contourAnnotations = collectAnnotations(MANUAL_CONTOUR_TOOL)
+        .filter(item => {
+          const modelType = item?.data?.modelType || 'manual';
+          if (modelType !== segmentationModel) {
+            return false;
+          }
+          if (seriesInstanceUID && item?.data?.seriesInstanceUID) {
+            return item.data.seriesInstanceUID === seriesInstanceUID;
+          }
+          return true;
+        })
+        .sort((a, b) => (a?.data?.modifiedAt || 0) - (b?.data?.modifiedAt || 0));
+
+      contourAnnotations.forEach(contour => {
+        const frameIndex = resolveFrameIndex(contour);
+        if (frameIndex < 0 || frameIndex >= frameCount) {
+          return;
+        }
+
+        const labelId = contour?.data?.labelId;
+        const labelIndex = labelId ? labelIdToIndex.get(labelId) : undefined;
+        if (!labelIndex) {
+          return;
+        }
+
+        const polyline = contour?.data?.contour?.polyline || contour?.data?.handles?.points;
+        if (!polyline || polyline.length < 3) {
+          return;
+        }
+
+        const polygon = polyline
+          .map(point => worldToMaskPoint(point))
+          .filter((point): point is [number, number] => !!point);
+        if (polygon.length < 3) {
+          return;
+        }
+
+        rasterizePolygon(frameLabelMasks[frameIndex], polygon, labelIndex);
+      });
+
+      const maskAnnotations = collectAnnotations(MASK_CONTOUR_TOOL).filter(item => {
+        if (seriesInstanceUID && item?.data?.seriesInstanceUID) {
+          return item.data.seriesInstanceUID === seriesInstanceUID;
+        }
+        return true;
+      });
+
+      maskAnnotations.forEach(mask => {
+        const frameIndex = resolveFrameIndex(mask);
+        if (frameIndex < 0 || frameIndex >= frameCount) {
+          return;
+        }
+
+        const polyline = mask?.data?.contour?.polyline || mask?.data?.handles?.points;
+        if (!polyline || polyline.length < 3) {
+          return;
+        }
+
+        const polygon = polyline
+          .map(point => worldToMaskPoint(point))
+          .filter((point): point is [number, number] => !!point);
+        if (polygon.length < 3) {
+          return;
+        }
+
+        rasterizePolygon(frameBinaryMasks[frameIndex], polygon, 1);
+      });
+
+      return {
+        labelFrames: frameLabelMasks,
+        maskFrames: frameBinaryMasks,
+      };
+    },
+    [
+      roiAnnotation,
+      activeViewportId,
+      cornerstoneViewportService,
+      segmentationModel,
+    ]
+  );
 
   const renderAccurateRoiPreview = useCallback(() => {
     if (!roiAnnotation || !activeViewportId || !cornerstoneViewportService) {
@@ -1019,6 +1283,16 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     console.log('[Overlay Debug] Drawing ROI image at', startX, startY, 'with display size:', scaledWidth, 'x', scaledHeight);
     ctx.drawImage(roiCanvas, startX, startY, scaledWidth, scaledHeight);
 
+    let accurateRoiTransform:
+      | {
+          worldToRoiLocal: (worldPoint: number[]) => [number, number];
+          widthLength: number;
+          heightLength: number;
+          roiMaskWidth: number;
+          roiMaskHeight: number;
+        }
+      | null = null;
+
     // === Overlay Rendering: Manual Contour Segmentation Masks ===
     // Get viewport information needed for coordinate transformation
     const viewportInfo = cornerstoneViewportService.getViewportInfo?.(activeViewportId);
@@ -1026,158 +1300,250 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     const sourceCanvas = element?.querySelector('canvas');
 
     console.log('[Overlay Debug] element:', element, 'sourceCanvas:', sourceCanvas);
+    console.log('[Overlay Debug] stack.geometry available:', !!stack.geometry);
 
     if (element && sourceCanvas) {
-      // Get ROI annotation points and calculate geometry using worldToIndex (same as buildTemporalRoiStack)
       const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
 
       if (points.length === 4) {
-        // Use the same worldToIndex transformation as buildTemporalRoiStack
-        const getWorldToIndex = () => {
-          if (viewport.worldToIndex) {
-            return (point: number[]) => viewport.worldToIndex(point);
-          }
+        // Try to use stored geometry from buildTemporalRoiStack first (preferred path)
+        let topLeft: number[];
+        let bottomLeft: number[];
+        let widthVec: number[];
+        let heightVec: number[];
+        let widthLength: number;
+        let heightLength: number;
+        let shouldSwapIndexAxesForOverlay = false;
+        let worldToIndex: ((point: number[]) => number[]) | null = null;
 
-          // Fallback: calculate worldToIndex from DICOM metadata (same as buildTemporalRoiStack)
-          const imagePlane = metaData.get('imagePlaneModule', imageId);
-          const orientation = imagePlane?.imageOrientationPatient;
-          const position = imagePlane?.imagePositionPatient;
-          const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
-          const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+        if (stack.geometry) {
+          console.log('[Overlay Debug] Using stored geometry from buildTemporalRoiStack');
+          // Use the exact geometry that was used to create the base ROI image
+          topLeft = stack.geometry.topLeft;
+          bottomLeft = stack.geometry.bottomLeft;
+          widthVec = stack.geometry.widthVec;
+          heightVec = stack.geometry.heightVec;
+          widthLength = stack.geometry.widthLength;
+          heightLength = stack.geometry.heightLength;
+          shouldSwapIndexAxesForOverlay = stack.geometry.shouldSwapIndexAxes === true;
 
-          if (!orientation || !position) {
-            return null;
-          }
+          // Get worldToIndex using the same approach as buildTemporalRoiStack
+          const getWorldToIndex = () => {
+            if (viewport.worldToIndex) {
+              return (point: number[]) => viewport.worldToIndex(point);
+            }
 
-          const rowCosines = [orientation[0], orientation[1], orientation[2]];
-          const colCosines = [orientation[3], orientation[4], orientation[5]];
+            // Use the same reference imageId that buildTemporalRoiStack used
+            const refImageId = stack.geometry.referenceImageId;
+            const imagePlane = metaData.get('imagePlaneModule', refImageId);
+            const orientation = imagePlane?.imageOrientationPatient;
+            const position = imagePlane?.imagePositionPatient;
+            const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+            const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
 
-          return (point: number[]) => {
-            const dx = point[0] - position[0];
-            const dy = point[1] - position[1];
-            const dz = point[2] - position[2];
-            const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
-            const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
-            return [col, row, 0];
+            if (!orientation || !position) {
+              return null;
+            }
+
+            const rowCosines = [orientation[0], orientation[1], orientation[2]];
+            const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+            return (point: number[]) => {
+              const dx = point[0] - position[0];
+              const dy = point[1] - position[1];
+              const dz = point[2] - position[2];
+              const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+              const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+              return [col, row, 0];
+            };
           };
-        };
 
-        const worldToIndex = getWorldToIndex();
+          worldToIndex = getWorldToIndex();
+        } else {
+          console.log('[Overlay Debug] Fallback: recalculating geometry (legacy path)');
+          // FALLBACK: Recalculate geometry (legacy behavior, will be removed when confirmed working)
+          // Use the same worldToIndex transformation as buildTemporalRoiStack
+          const getWorldToIndex = () => {
+            if (viewport.worldToIndex) {
+              return (point: number[]) => viewport.worldToIndex(point);
+            }
+
+            // Fallback: calculate worldToIndex from DICOM metadata (same as buildTemporalRoiStack)
+            const imagePlane = metaData.get('imagePlaneModule', imageId);
+            const orientation = imagePlane?.imageOrientationPatient;
+            const position = imagePlane?.imagePositionPatient;
+            const rowSpacing = imagePlane?.rowPixelSpacing ?? 1;
+            const colSpacing = imagePlane?.columnPixelSpacing ?? 1;
+
+            if (!orientation || !position) {
+              return null;
+            }
+
+            const rowCosines = [orientation[0], orientation[1], orientation[2]];
+            const colCosines = [orientation[3], orientation[4], orientation[5]];
+
+            return (point: number[]) => {
+              const dx = point[0] - position[0];
+              const dy = point[1] - position[1];
+              const dz = point[2] - position[2];
+              const row = (dx * rowCosines[0] + dy * rowCosines[1] + dz * rowCosines[2]) / rowSpacing;
+              const col = (dx * colCosines[0] + dy * colCosines[1] + dz * colCosines[2]) / colSpacing;
+              return [col, row, 0];
+            };
+          };
+
+          worldToIndex = getWorldToIndex();
+        }
+
         if (!worldToIndex) {
           console.warn('[Overlay Debug] worldToIndex not available, skipping overlay');
           return;
         }
         console.log('[Overlay Debug] worldToIndex successfully created');
 
-        // Transform ROI corner points to index space and stabilize ordering (same as buildTemporalRoiStack)
-        const indexedPoints = points.map(point => ({
-          world: point,
-          index: worldToIndex(point),
-          canvas: viewport.worldToCanvas ? viewport.worldToCanvas(point) : null,
-        }));
-        if (indexedPoints.some(point => !point.index || point.index.length < 2)) {
-          console.warn('[Overlay Debug] index points missing, skipping overlay');
-          return;
-        }
-        if (indexedPoints.some(point => !point.canvas || point.canvas.length < 2)) {
-          console.warn('[Overlay Debug] canvas points missing, skipping overlay');
-          return;
-        }
-
-        const canvasCenter = indexedPoints.reduce(
-          (acc, point) => {
-            acc[0] += point.canvas![0];
-            acc[1] += point.canvas![1];
-            return acc;
-          },
-          [0, 0]
-        );
-        canvasCenter[0] /= indexedPoints.length;
-        canvasCenter[1] /= indexedPoints.length;
-
-        const ordered = {
-          topLeft: null as typeof indexedPoints[number] | null,
-          topRight: null as typeof indexedPoints[number] | null,
-          bottomLeft: null as typeof indexedPoints[number] | null,
-          bottomRight: null as typeof indexedPoints[number] | null,
-        };
-
-        indexedPoints.forEach(point => {
-          const dx = point.canvas![0] - canvasCenter[0];
-          const dy = point.canvas![1] - canvasCenter[1];
-          if (dx <= 0 && dy <= 0) {
-            ordered.topLeft = point;
-          } else if (dx > 0 && dy <= 0) {
-            ordered.topRight = point;
-          } else if (dx <= 0 && dy > 0) {
-            ordered.bottomLeft = point;
-          } else {
-            ordered.bottomRight = point;
+        // If using fallback path, recalculate geometry
+        if (!stack.geometry) {
+          // Transform ROI corner points to index space and stabilize ordering (same as buildTemporalRoiStack)
+          const indexedPoints = points.map(point => ({
+            world: point,
+            index: worldToIndex(point),
+            canvas: viewport.worldToCanvas ? viewport.worldToCanvas(point) : null,
+          }));
+          if (indexedPoints.some(point => !point.index || point.index.length < 2)) {
+            console.warn('[Overlay Debug] index points missing, skipping overlay');
+            return;
           }
-        });
+          if (indexedPoints.some(point => !point.canvas || point.canvas.length < 2)) {
+            console.warn('[Overlay Debug] canvas points missing, skipping overlay');
+            return;
+          }
 
-        if (!ordered.topLeft || !ordered.topRight || !ordered.bottomLeft || !ordered.bottomRight) {
-          console.warn('[Overlay Debug] could not order ROI points, skipping overlay');
-          return;
+          const canvasCenter = indexedPoints.reduce(
+            (acc, point) => {
+              acc[0] += point.canvas![0];
+              acc[1] += point.canvas![1];
+              return acc;
+            },
+            [0, 0]
+          );
+          canvasCenter[0] /= indexedPoints.length;
+          canvasCenter[1] /= indexedPoints.length;
+
+          const ordered = {
+            topLeft: null as typeof indexedPoints[number] | null,
+            topRight: null as typeof indexedPoints[number] | null,
+            bottomLeft: null as typeof indexedPoints[number] | null,
+            bottomRight: null as typeof indexedPoints[number] | null,
+          };
+
+          indexedPoints.forEach(point => {
+            const dx = point.canvas![0] - canvasCenter[0];
+            const dy = point.canvas![1] - canvasCenter[1];
+            if (dx <= 0 && dy <= 0) {
+              ordered.topLeft = point;
+            } else if (dx > 0 && dy <= 0) {
+              ordered.topRight = point;
+            } else if (dx <= 0 && dy > 0) {
+              ordered.bottomLeft = point;
+            } else {
+              ordered.bottomRight = point;
+            }
+          });
+
+          if (!ordered.topLeft || !ordered.topRight || !ordered.bottomLeft || !ordered.bottomRight) {
+            console.warn('[Overlay Debug] could not order ROI points, skipping overlay');
+            return;
+          }
+
+          let bottomLeftFallback = ordered.bottomLeft.index!;
+          let bottomRightFallback = ordered.bottomRight.index!;
+          let topLeftFallback = ordered.topLeft.index!;
+
+          const indexTopLeft = ordered.topLeft.index!;
+          const indexTopRight = ordered.topRight.index!;
+          const indexBottomLeft = ordered.bottomLeft.index!;
+          const indexDeltaX = [
+            indexTopRight[0] - indexTopLeft[0],
+            indexTopRight[1] - indexTopLeft[1],
+          ];
+          const indexDeltaY = [
+            indexBottomLeft[0] - indexTopLeft[0],
+            indexBottomLeft[1] - indexTopLeft[1],
+          ];
+          const xAxisIsCol = Math.abs(indexDeltaX[0]) >= Math.abs(indexDeltaX[1]);
+          const yAxisIsRow = Math.abs(indexDeltaY[1]) >= Math.abs(indexDeltaY[0]);
+          const shouldSwapIndexAxes = !xAxisIsCol && !yAxisIsRow;
+          shouldSwapIndexAxesForOverlay = shouldSwapIndexAxes;
+          if (shouldSwapIndexAxes) {
+            const swapAxis = (point: number[]) => [point[1], point[0], point[2]];
+            bottomLeftFallback = swapAxis(bottomLeftFallback);
+            bottomRightFallback = swapAxis(bottomRightFallback);
+            topLeftFallback = swapAxis(topLeftFallback);
+          }
+
+          // Calculate ROI geometry in index space and assign to outer scope variables
+          topLeft = topLeftFallback;
+          bottomLeft = bottomLeftFallback;
+          widthVec = [
+            bottomRightFallback[0] - bottomLeftFallback[0],
+            bottomRightFallback[1] - bottomLeftFallback[1],
+          ];
+          heightVec = [
+            topLeftFallback[0] - bottomLeftFallback[0],
+            topLeftFallback[1] - bottomLeftFallback[1],
+          ];
+
+          widthLength = Math.hypot(widthVec[0], widthVec[1]);
+          heightLength = Math.hypot(heightVec[0], heightVec[1]);
         }
 
-        let bottomLeft = ordered.bottomLeft.index!;
-        let bottomRight = ordered.bottomRight.index!;
-        let topLeft = ordered.topLeft.index!;
-
-        const indexTopLeft = ordered.topLeft.index!;
-        const indexTopRight = ordered.topRight.index!;
-        const indexBottomLeft = ordered.bottomLeft.index!;
-        const indexDeltaX = [
-          indexTopRight[0] - indexTopLeft[0],
-          indexTopRight[1] - indexTopLeft[1],
-        ];
-        const indexDeltaY = [
-          indexBottomLeft[0] - indexTopLeft[0],
-          indexBottomLeft[1] - indexTopLeft[1],
-        ];
-        const xAxisIsCol = Math.abs(indexDeltaX[0]) >= Math.abs(indexDeltaX[1]);
-        const yAxisIsRow = Math.abs(indexDeltaY[1]) >= Math.abs(indexDeltaY[0]);
-        const shouldSwapIndexAxes = !xAxisIsCol && !yAxisIsRow;
-        if (shouldSwapIndexAxes) {
-          const swapAxis = (point: number[]) => [point[1], point[0], point[2]];
-          bottomLeft = swapAxis(bottomLeft);
-          bottomRight = swapAxis(bottomRight);
-          topLeft = swapAxis(topLeft);
-        }
-
-        // Calculate ROI geometry in index space
-        const widthVec = [
-          bottomRight[0] - bottomLeft[0],
-          bottomRight[1] - bottomLeft[1],
-        ];
-        const heightVec = [
-          topLeft[0] - bottomLeft[0],
-          topLeft[1] - bottomLeft[1],
-        ];
-
-        const widthLength = Math.hypot(widthVec[0], widthVec[1]);
-        const heightLength = Math.hypot(heightVec[0], heightVec[1]);
-
-        // Coordinate transformation function: world → index → ROI local coords
+        // Coordinate transformation function: world → index → ROI local coords.
+        // This mirrors buildTemporalRoiStack sampling:
+        // index = topLeft + widthVec*u + (-heightVec)*v where u,v in [0,1].
         const worldToRoiLocal = (worldPoint: number[]) => {
-          const indexPoint = worldToIndex(worldPoint);
-          // Express point relative to bottomLeft corner, in terms of width/height vectors
-          const dx = indexPoint[0] - bottomLeft[0];
-          const dy = indexPoint[1] - bottomLeft[1];
+          const rawIndexPoint = worldToIndex(worldPoint);
+          const indexPoint = shouldSwapIndexAxesForOverlay
+            ? [rawIndexPoint[1], rawIndexPoint[0], rawIndexPoint[2]]
+            : rawIndexPoint;
+          const relX = indexPoint[0] - topLeft[0];
+          const relY = indexPoint[1] - topLeft[1];
 
-          // Project onto width and height vectors
-          const u = (dx * widthVec[0] + dy * widthVec[1]) / (widthLength * widthLength);
-          const v = (dx * heightVec[0] + dy * heightVec[1]) / (heightLength * heightLength);
+          const downVecX = -heightVec[0];
+          const downVecY = -heightVec[1];
+
+          const det = widthVec[0] * downVecY - widthVec[1] * downVecX;
+          if (Math.abs(det) < 1e-6) {
+            return [0, 0];
+          }
+
+          const u = (relX * downVecY - relY * downVecX) / det;
+          const v = (widthVec[0] * relY - widthVec[1] * relX) / det;
 
           return [u * widthLength, v * heightLength];
         };
+
+        console.log('[Overlay Debug] Geometry being used:', {
+          bottomLeft,
+          widthVec,
+          heightVec,
+          widthLength,
+          heightLength,
+          shouldSwapIndexAxesForOverlay,
+          source: stack.geometry ? 'buildTemporalRoiStack' : 'recalculated',
+        });
 
         // Create overlay data structures - must match ROI canvas dimensions
         const roiMaskWidth = Math.max(1, Math.round(roiWidth));
         const roiMaskHeight = Math.max(1, Math.round(roiHeight));
         console.log('[Overlay Debug] roiWidth:', roiWidth, 'roiHeight:', roiHeight);
         console.log('[Overlay Debug] Creating overlay of size:', roiMaskWidth, 'x', roiMaskHeight);
+        accurateRoiTransform = {
+          worldToRoiLocal,
+          widthLength,
+          heightLength,
+          roiMaskWidth,
+          roiMaskHeight,
+        };
         const maskData = new Uint8Array(roiMaskWidth * roiMaskHeight);
         const overlayImageData = ctx.createImageData(roiMaskWidth, roiMaskHeight);
 
@@ -1385,45 +1751,14 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     if (element && sourceCanvas) {
       const points = roiAnnotation?.data?.handles?.points?.slice(0, 4) || [];
 
-      if (points.length === 4) {
-        // Reuse geometry calculations from overlay rendering
-        const elementWidth = element.clientWidth || 0;
-        const elementHeight = element.clientHeight || 0;
-        const sourceWidth = sourceCanvas.width;
-        const sourceHeight = sourceCanvas.height;
-        const scaleX = elementWidth > 0 && sourceWidth > 0 ? sourceWidth / elementWidth : 1;
-        const scaleY = elementHeight > 0 && sourceHeight > 0 ? sourceHeight / elementHeight : 1;
-        const needsNormalization = (scaleX > 1.01 || scaleY > 1.01) && (elementWidth > 0 && elementHeight > 0);
-
-        const canvasPoints = points.map(point => viewport.worldToCanvas(point));
-        const bottomLeft = canvasPoints[0];
-        const bottomRight = canvasPoints[1];
-        const topRight = canvasPoints[2];
-
-        const angle = Math.atan2(bottomRight[1] - bottomLeft[1], bottomRight[0] - bottomLeft[0]);
-        const center = [(bottomLeft[0] + topRight[0]) / 2, (bottomLeft[1] + topRight[1]) / 2];
-
-        const normalizeCanvasPoint = (worldPoint: number[]) => {
-          const canvasPoint = viewport.worldToCanvas(worldPoint);
-          if (!needsNormalization) {
-            return canvasPoint;
-          }
-          return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
-        };
-
-        const cosAngle = Math.cos(-angle);
-        const sinAngle = Math.sin(-angle);
-
-        const toPreviewPoint = (canvasPoint: number[]) => {
-          const dx = canvasPoint[0] - center[0];
-          const dy = canvasPoint[1] - center[1];
-          const rotatedX = dx * cosAngle - dy * sinAngle;
-          const rotatedY = dx * sinAngle + dy * cosAngle;
-          return [
-            rotatedX * scale + PREVIEW_WIDTH / 2,
-            rotatedY * scale + PREVIEW_HEIGHT / 2,
-          ];
-        };
+      if (points.length === 4 && accurateRoiTransform) {
+        const {
+          worldToRoiLocal,
+          widthLength,
+          heightLength,
+          roiMaskWidth,
+          roiMaskHeight,
+        } = accurateRoiTransform;
 
         // Get mask contour annotations
         const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
@@ -1470,14 +1805,19 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
 
             // Transform contour points to preview canvas space
             const previewPoints = polyline.map(point => {
-              const canvasPoint = normalizeCanvasPoint(point);
-              return toPreviewPoint(canvasPoint);
+              const [localX, localY] = worldToRoiLocal(point);
+              const maskX = (localX / widthLength) * roiMaskWidth;
+              const maskY = (localY / heightLength) * roiMaskHeight;
+              return [
+                startX + (maskX / roiMaskWidth) * scaledWidth,
+                startY + (maskY / roiMaskHeight) * scaledHeight,
+              ];
             });
 
             // Draw mask contour as dashed outline first
             ctx.save();
             ctx.strokeStyle = MASK_CONTOUR_COLOR;
-            ctx.lineWidth = 2;
+            ctx.lineWidth = MASK_CONTOUR_LINE_WIDTH;
             ctx.setLineDash([6, 4]);
             ctx.beginPath();
             previewPoints.forEach((point, index) => {
@@ -1570,7 +1910,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     if (tickEveryPxX > 6 || tickEveryPxY > 6) {
       const tickLength = 16;
       const labelOffset = 6;
-      const fontSize = 40;
+      const fontSize = PREVIEW_GRID_LABEL_FONT_SIZE;
       const originalLineWidth = ctx.lineWidth;
       ctx.lineWidth = 4;
 
@@ -1598,14 +1938,18 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         let tickIndex = 0;
         for (let y = 0; y <= PREVIEW_HEIGHT + 0.5; y += tickEveryPxY) {
           const labelValue = tickIndex * tickEveryUnit;
-          ctx.textAlign = 'left';
+          ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.beginPath();
           ctx.moveTo(0, y);
           ctx.lineTo(tickLength, y);
           ctx.stroke();
           if (tickIndex !== 0) {
-            ctx.fillText(`${labelValue}${unitLabel}`, tickLength + labelOffset, y);
+            ctx.save();
+            ctx.translate(tickLength + labelOffset, y);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText(`${labelValue}${unitLabel}`, 0, 0);
+            ctx.restore();
           }
           tickIndex += 1;
         }
@@ -1648,6 +1992,9 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     cornerstoneViewportService,
     kymographSettings,
     roiAnnotation,
+    segmentationLabels,
+    segmentationModel,
+    displaySetService,
   ]);
 
   const scheduleAccuratePreview = useCallback(() => {
@@ -1727,26 +2074,11 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       }
 
       const { frames, width, height, spacing, frameTimeMs, imageIds } = stack;
+      const segmentationStacks = buildTemporalSegmentationStacks(stack);
       const instance = imageIds[0] ? metaData.get('instance', imageIds[0]) : null;
       const seriesUid = instance?.SeriesInstanceUID || 'series';
       const baseName = `temporal-roi-${seriesUid}`;
       setExportProgress(40);
-
-      let saveHandle: FileSystemFileHandle | null = null;
-      const tentativeExtension =
-        exportFormat === 'nifti_gz' ? 'nii.gz' : exportFormat === 'nifti' ? 'nii' : 'tiff';
-      const suggestedName = `${baseName}.${tentativeExtension}`;
-      try {
-        saveHandle = await requestSaveHandle(
-          suggestedName,
-          exportFormat === 'tiff' ? 'image/tiff' : 'application/octet-stream'
-        );
-      } catch (error) {
-        if ((error as DOMException)?.name !== 'AbortError') {
-          throw error;
-        }
-        return;
-      }
 
       warningTimeout = window.setTimeout(() => {
         if (!exportInProgressRef.current) {
@@ -1758,6 +2090,8 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
           type: 'warning',
         });
       }, 3000);
+
+      const exportFiles: { name: string; data: ArrayBuffer; mimeType: string }[] = [];
 
       if (exportFormat === 'nifti' || exportFormat === 'nifti_gz') {
         const niftiBuffer = buildNiftiBuffer({
@@ -1778,19 +2112,149 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         }
         setExportProgress(85);
         const fileName = `${baseName}.${extension}`;
-        if (saveHandle) {
-          await writeBufferToHandle(saveHandle, outputBuffer, 'application/octet-stream');
-        } else {
-          downloadBlob(new Blob([outputBuffer], { type: 'application/octet-stream' }), fileName);
+        exportFiles.push({
+          name: fileName,
+          data: outputBuffer,
+          mimeType: 'application/octet-stream',
+        });
+
+        if (segmentationStacks) {
+          const labelBuffer = buildNiftiBuffer({
+            frames: segmentationStacks.labelFrames,
+            width,
+            height,
+            spacing,
+            frameTimeMs,
+          });
+          const maskBuffer = buildNiftiBuffer({
+            frames: segmentationStacks.maskFrames,
+            width,
+            height,
+            spacing,
+            frameTimeMs,
+          });
+
+          const labelsOutput =
+            exportFormat === 'nifti_gz' && typeof CompressionStream !== 'undefined'
+              ? await gzipBuffer(labelBuffer)
+              : labelBuffer;
+          const maskOutput =
+            exportFormat === 'nifti_gz' && typeof CompressionStream !== 'undefined'
+              ? await gzipBuffer(maskBuffer)
+              : maskBuffer;
+          const segExtension =
+            exportFormat === 'nifti_gz' && typeof CompressionStream !== 'undefined' ? 'nii.gz' : 'nii';
+
+          exportFiles.push({
+            name: `${baseName}-segmentation-labels.${segExtension}`,
+            data: labelsOutput,
+            mimeType: 'application/octet-stream',
+          });
+          exportFiles.push({
+            name: `${baseName}-mask.${segExtension}`,
+            data: maskOutput,
+            mimeType: 'application/octet-stream',
+          });
+
+          const labelManifest = SEGMENTATION_LABELS.map((label, index) => ({
+            value: index + 1,
+            id: label.id,
+            name: label.name,
+            color: label.color,
+          }));
+          const manifestBuffer = new TextEncoder().encode(
+            JSON.stringify({ labels: labelManifest }, null, 2)
+          ).buffer;
+          exportFiles.push({
+            name: `${baseName}-segmentation-labels-map.json`,
+            data: manifestBuffer,
+            mimeType: 'application/json',
+          });
         }
       } else {
         const tiffBuffer = buildTiffBuffer({ frames, width, height });
         setExportProgress(85);
         const fileName = `${baseName}.tiff`;
+        exportFiles.push({ name: fileName, data: tiffBuffer, mimeType: 'image/tiff' });
+
+        if (segmentationStacks) {
+          const labelTiffBuffer = buildTiffBuffer({
+            frames: segmentationStacks.labelFrames,
+            width,
+            height,
+          });
+          const maskTiffBuffer = buildTiffBuffer({
+            frames: segmentationStacks.maskFrames,
+            width,
+            height,
+          });
+
+          exportFiles.push({
+            name: `${baseName}-segmentation-labels.tiff`,
+            data: labelTiffBuffer,
+            mimeType: 'image/tiff',
+          });
+          exportFiles.push({
+            name: `${baseName}-mask.tiff`,
+            data: maskTiffBuffer,
+            mimeType: 'image/tiff',
+          });
+
+          const labelManifest = SEGMENTATION_LABELS.map((label, index) => ({
+            value: index + 1,
+            id: label.id,
+            name: label.name,
+            color: label.color,
+          }));
+          const manifestBuffer = new TextEncoder().encode(
+            JSON.stringify({ labels: labelManifest }, null, 2)
+          ).buffer;
+          exportFiles.push({
+            name: `${baseName}-segmentation-labels-map.json`,
+            data: manifestBuffer,
+            mimeType: 'application/json',
+          });
+        }
+      }
+
+      const shouldBundleZip = exportFiles.length > 1;
+      const outputName = shouldBundleZip ? `${baseName}.zip` : exportFiles[0]?.name;
+      const outputMimeType = shouldBundleZip ? 'application/zip' : exportFiles[0]?.mimeType;
+
+      let saveHandle: FileSystemFileHandle | null = null;
+      if (outputName && outputMimeType) {
+        try {
+          saveHandle = await requestSaveHandle(outputName, outputMimeType);
+        } catch (error) {
+          if ((error as DOMException)?.name !== 'AbortError') {
+            throw error;
+          }
+          return;
+        }
+      }
+
+      if (!exportFiles.length) {
+        throw new Error('No export files were generated');
+      }
+
+      if (shouldBundleZip) {
+        const zipBuffer = buildZipBuffer(
+          exportFiles.map(file => ({
+            name: file.name,
+            data: file.data,
+          }))
+        );
         if (saveHandle) {
-          await writeBufferToHandle(saveHandle, tiffBuffer, 'image/tiff');
+          await writeBufferToHandle(saveHandle, zipBuffer, 'application/zip');
+        } else if (outputName) {
+          downloadBlob(new Blob([zipBuffer], { type: 'application/zip' }), outputName);
+        }
+      } else {
+        const [singleFile] = exportFiles;
+        if (saveHandle) {
+          await writeBufferToHandle(saveHandle, singleFile.data, singleFile.mimeType);
         } else {
-          downloadBlob(new Blob([tiffBuffer], { type: 'image/tiff' }), fileName);
+          downloadBlob(new Blob([singleFile.data], { type: singleFile.mimeType }), singleFile.name);
         }
       }
 
@@ -1816,7 +2280,14 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       exportInProgressRef.current = false;
       setTimeout(() => setExportProgress(0), 400);
     }
-  }, [buildTemporalRoiStack, exportFormat, handleDebugExport, isExporting, uiNotificationService]);
+  }, [
+    buildTemporalRoiStack,
+    buildTemporalSegmentationStacks,
+    exportFormat,
+    handleDebugExport,
+    isExporting,
+    uiNotificationService,
+  ]);
 
   const getSelectedAnalysisRoi = useCallback(() => {
     const frameOfReferenceUID = getActiveFrameOfReferenceUID();
@@ -2417,7 +2888,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
       // Draw dashed outline
       ctx.save();
       ctx.strokeStyle = MASK_CONTOUR_COLOR;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = MASK_CONTOUR_LINE_WIDTH;
       ctx.setLineDash([6, 4]);
       ctx.beginPath();
       previewPoints.forEach((point, index) => {
@@ -2535,7 +3006,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     if (tickEveryPxX > 6 || tickEveryPxY > 6) {
       const tickLength = 16;
       const labelOffset = 6;
-      const fontSize = 40;
+      const fontSize = PREVIEW_GRID_LABEL_FONT_SIZE;
       const originalLineWidth = ctx.lineWidth;
       ctx.lineWidth = 4;
 
@@ -2564,14 +3035,18 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
         let tickIndex = 0;
         for (let y = 0; y <= PREVIEW_HEIGHT + 0.5; y += tickEveryPxY) {
           const labelValue = tickIndex * tickEveryUnit;
-          ctx.textAlign = 'left';
+          ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.beginPath();
           ctx.moveTo(0, y);
           ctx.lineTo(tickLength, y);
           ctx.stroke();
           if (tickIndex !== 0) {
-            ctx.fillText(`${labelValue}${unitLabel}`, tickLength + labelOffset, y);
+            ctx.save();
+            ctx.translate(tickLength + labelOffset, y);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText(`${labelValue}${unitLabel}`, 0, 0);
+            ctx.restore();
           }
 
           tickIndex += 1;
@@ -2616,6 +3091,7 @@ const RoiViewerPanel: React.FC<RoiViewerPanelProps> = ({
     cornerstoneViewportService,
     kymographSettings,
     segmentationLabels,
+    segmentationModel,
     displaySetService,
     isRoiInActiveSeries,
     scheduleAccuratePreview,
