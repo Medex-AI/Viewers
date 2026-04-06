@@ -1,15 +1,12 @@
-import {
-  eventTarget,
-  getEnabledElement,
-  getEnabledElementByIds,
-  utilities as csUtils,
-} from '@cornerstonejs/core';
+import { eventTarget, getEnabledElement, getEnabledElementByIds, utilities as csUtils } from '@cornerstonejs/core';
 import { annotation, Enums, utilities } from '@cornerstonejs/tools';
 import { DicomMetadataStore } from '@ohif/core';
 import ManualContourLabelMenu from '../components/ManualContourLabelMenu';
 
 const TOOL_NAME = 'ManualContour';
 const TOOL_GROUP_ID = 'default';
+const CONTOUR_LINE_WIDTH = '2';
+const DEFAULT_FILL_OPACITY = 0.2;
 const LABELS = [
   { id: 'uterineCavity', label: 'Uterine cavity', color: '#22D3EE' },
   { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
@@ -20,8 +17,21 @@ const LABELS = [
 let activeLabelId = LABELS[0].id;
 let isManualContourActive = false;
 let activeViewportHintTargets: HTMLElement[] = [];
+const isTouchCapableDevice = () =>
+  typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
 const getLabelConfig = labelId => LABELS.find(label => label.id === labelId) || LABELS[0];
+
+export const getActiveManualContourLabelId = () => activeLabelId;
+
+const setGlobalActiveManualContourLabelId = (labelId: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  (window as Window & { __oviActiveManualContourLabelId?: string }).__oviActiveManualContourLabelId =
+    labelId;
+};
 
 const lightenHexColor = (hexColor: string, ratio = 0.35) => {
   const hex = hexColor.replace('#', '');
@@ -70,6 +80,10 @@ const applyToolGroupStyle = labelId => {
       color,
       colorHighlighted: highlightColor,
       colorSelected: highlightColor,
+      lineWidth: CONTOUR_LINE_WIDTH,
+      fillColor: color,
+      fillOpacity: DEFAULT_FILL_OPACITY,
+      renderFill: true,
     },
   });
 
@@ -84,12 +98,25 @@ const applyAnnotationStyle = (annotationUID, labelId) => {
     color,
     colorHighlighted: highlightColor,
     colorSelected: highlightColor,
+    lineWidth: CONTOUR_LINE_WIDTH,
+    fillColor: color,
+    fillOpacity: DEFAULT_FILL_OPACITY,
+    renderFill: true,
   });
 };
 
 const updateActiveLabel = labelId => {
   activeLabelId = labelId;
+  setGlobalActiveManualContourLabelId(labelId);
   applyToolGroupStyle(activeLabelId);
+  // Deselect all annotations so the tool starts a fresh draw rather than
+  // editing the previously selected annotation of a different class.
+  try {
+    const selected = annotation.selection.getAnnotationsSelected?.() || [];
+    selected.forEach(uid => annotation.selection.setAnnotationSelected(uid, false));
+  } catch {
+    // selection API may not be available in all Cornerstone versions
+  }
 };
 
 const updateAnnotationLabel = (annotationToUpdate, labelId, element) => {
@@ -201,6 +228,9 @@ const createManualContourAnnotation = ({
     metadata,
     data: {
       ...(sourceAnnotation?.data || {}),
+      fillColor: sourceAnnotation?.data?.fillColor || sourceAnnotation?.data?.labelColor,
+      fillOpacity: sourceAnnotation?.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
+      renderFill: sourceAnnotation?.data?.renderFill ?? true,
       contour: {
         ...(sourceAnnotation?.data?.contour || {}),
         polyline: contourPoints,
@@ -323,7 +353,7 @@ const removeManualContourHints = () => {
 
 const renderManualContourHints = () => {
   removeManualContourHints();
-  if (typeof document === 'undefined') {
+  if (typeof document === 'undefined' || isTouchCapableDevice()) {
     return;
   }
 
@@ -412,6 +442,7 @@ export const showManualContourLabelMenu = ({
 export default function setupManualContourBehavior(servicesManager: AppTypes.ServicesManager) {
   const { uiDialogService } = servicesManager.services;
 
+  setGlobalActiveManualContourLabelId(activeLabelId);
   applyToolGroupStyle(activeLabelId);
 
 
@@ -465,6 +496,9 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       labelId,
       labelName: labelConfig.label,
       labelColor: labelConfig.color,
+      fillColor: newAnnotation.data?.fillColor || labelConfig.color,
+      fillOpacity: newAnnotation.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
+      renderFill: newAnnotation.data?.renderFill ?? true,
       createdAt: now,
       modifiedAt: now,
       frameNumber: newAnnotation.data?.frameNumber ?? frameNumber,
@@ -491,23 +525,42 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
     const currentImageId = newAnnotation.metadata?.referencedImageId;
     const currentFrameNumber = newAnnotation.data?.frameNumber;
+    const currentModelType = newAnnotation.data?.modelType || 'manual';
+    const currentSeriesInstanceUID = newAnnotation.data?.seriesInstanceUID;
 
     existingAnnotations.forEach(existingAnnotation => {
+      if (existingAnnotation.annotationUID === newAnnotation.annotationUID) {
+        return;
+      }
+
+      const existingModelType = existingAnnotation.data?.modelType || 'manual';
+      if (existingModelType !== currentModelType) {
+        return;
+      }
+
+      const existingSeriesInstanceUID = existingAnnotation.data?.seriesInstanceUID;
       if (
-        existingAnnotation.annotationUID !== newAnnotation.annotationUID &&
-        existingAnnotation.data?.labelId === labelId
+        currentSeriesInstanceUID &&
+        existingSeriesInstanceUID &&
+        existingSeriesInstanceUID !== currentSeriesInstanceUID
       ) {
-        const existingImageId = existingAnnotation.metadata?.referencedImageId;
-        const existingFrameNumber =
-          existingAnnotation.data?.frameNumber || existingAnnotation.metadata?.frameNumber;
-        const sameImageId = currentImageId && existingImageId && existingImageId === currentImageId;
-        const sameFrame =
-          !currentImageId &&
-          currentFrameNumber !== undefined &&
-          existingFrameNumber === currentFrameNumber;
-        if (sameImageId || sameFrame) {
-          annotation.state.removeAnnotation(existingAnnotation.annotationUID);
-        }
+        return;
+      }
+
+      const existingImageId = existingAnnotation.metadata?.referencedImageId;
+      const existingFrameNumber =
+        existingAnnotation.data?.frameNumber || existingAnnotation.metadata?.frameNumber;
+      const sameImageId = currentImageId && existingImageId && existingImageId === currentImageId;
+      const sameFrame =
+        !currentImageId &&
+        currentFrameNumber !== undefined &&
+        existingFrameNumber === currentFrameNumber;
+
+      if (
+        (sameImageId || sameFrame) &&
+        existingAnnotation.data?.labelId === newAnnotation.data?.labelId
+      ) {
+        annotation.state.removeAnnotation(existingAnnotation.annotationUID);
       }
     });
   };

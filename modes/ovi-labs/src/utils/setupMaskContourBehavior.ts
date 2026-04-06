@@ -10,6 +10,8 @@ import { DicomMetadataStore } from '@ohif/core';
 const TOOL_NAME = 'MaskContour';
 const TOOL_GROUP_ID = 'default';
 const MASK_LABEL = { id: 'mask', label: 'Mask', color: '#94A3B8' };
+const CONTOUR_LINE_WIDTH = '2';
+const DEFAULT_FILL_OPACITY = 0.2;
 
 let isMaskContourActive = false;
 let activeViewportHintTargets: HTMLElement[] = [];
@@ -24,6 +26,10 @@ const applyToolGroupStyle = () => {
       color: MASK_LABEL.color,
       colorHighlighted: MASK_LABEL.color,
       colorSelected: MASK_LABEL.color,
+      lineWidth: CONTOUR_LINE_WIDTH,
+      fillColor: MASK_LABEL.color,
+      fillOpacity: DEFAULT_FILL_OPACITY,
+      renderFill: true,
       lineDash: [6, 4],
       lineDashSelected: [6, 4],
     },
@@ -35,6 +41,10 @@ const applyAnnotationStyle = (annotationUID: string) => {
     color: MASK_LABEL.color,
     colorHighlighted: MASK_LABEL.color,
     colorSelected: MASK_LABEL.color,
+    lineWidth: CONTOUR_LINE_WIDTH,
+    fillColor: MASK_LABEL.color,
+    fillOpacity: DEFAULT_FILL_OPACITY,
+    renderFill: true,
     lineDash: [6, 4],
     lineDashSelected: [6, 4],
   });
@@ -53,6 +63,9 @@ const updateMaskAnnotation = (annotationToUpdate, element: HTMLElement | undefin
     labelId: MASK_LABEL.id,
     labelName: MASK_LABEL.label,
     labelColor: MASK_LABEL.color,
+    fillColor: annotationToUpdate.data?.fillColor || MASK_LABEL.color,
+    fillOpacity: annotationToUpdate.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
+    renderFill: annotationToUpdate.data?.renderFill ?? true,
     modelType: 'mask',
     frameNumber: instance?.frameNumber ?? viewport?.getCurrentImageIdIndex?.() + 1,
     seriesInstanceUID: instance?.SeriesInstanceUID,
@@ -234,6 +247,9 @@ const createMaskContourAnnotation = ({
     metadata,
     data: {
       ...(sourceAnnotation?.data || {}),
+      fillColor: sourceAnnotation?.data?.fillColor || MASK_LABEL.color,
+      fillOpacity: sourceAnnotation?.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
+      renderFill: sourceAnnotation?.data?.renderFill ?? true,
       contour: {
         ...(sourceAnnotation?.data?.contour || {}),
         polyline: contourPoints,

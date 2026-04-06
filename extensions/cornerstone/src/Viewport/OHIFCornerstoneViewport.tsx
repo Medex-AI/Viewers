@@ -1,11 +1,10 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { useResizeDetector } from 'react-resize-detector';
 import * as cs3DTools from '@cornerstonejs/tools';
-import { Enums, eventTarget, getEnabledElement } from '@cornerstonejs/core';
+import { Enums, eventTarget, getEnabledElement, utilities as csUtils } from '@cornerstonejs/core';
 import { MeasurementService } from '@ohif/core';
 import { AllInOneMenu } from '@ohif/ui-next';
 import { useViewportDialog } from '@ohif/ui-next';
-import type { Types as csTypes } from '@cornerstonejs/core';
 
 import { setEnabledElement } from '../state';
 
@@ -23,6 +22,60 @@ import ActiveViewportBehavior from '../utils/ActiveViewportBehavior';
 import { WITH_NAVIGATION } from '../services/ViewportService/CornerstoneViewportService';
 
 const STACK = 'stack';
+const TABLET_SCROLL_STEP_PX = 24;
+const TABLET_ZOOM_THRESHOLD_PX = 12;
+const TABLET_SCROLL_LOCK_THRESHOLD_PX = 8;
+const TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX = 14;
+const TABLET_SCROLL_MAX_VERTICAL_DELTA_MISMATCH_PX = 16;
+const TABLET_ZOOM_LOCK_THRESHOLD_PX = 4;
+const TABLET_PAN_LOCK_THRESHOLD_PX = 5;
+
+const isTouchCapableDevice = () =>
+  typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
+const getTouchDistance = (touches: Touch[]) => {
+  if (touches.length < 2) {
+    return 0;
+  }
+
+  const [a, b] = touches;
+  return Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+};
+
+const getTouchArray = (touchList: TouchList) => Array.from(touchList);
+const getTouchType = (touch?: Touch) => (touch as Touch & { touchType?: string })?.touchType || 'unknown';
+const touchListContainsStylus = (touches: TouchList | Touch[]) =>
+  Array.from(touches || []).some(
+    touch => (touch as Touch & { touchType?: string })?.touchType === 'stylus'
+  );
+const touchListContainsDirect = (touches: TouchList | Touch[]) =>
+  Array.from(touches || []).some(
+    touch => (touch as Touch & { touchType?: string })?.touchType === 'direct'
+  );
+
+const normalizeTouchPoint = (touch: Touch) => ({
+  x: touch.clientX,
+  y: touch.clientY,
+});
+
+const getTouchCenter = (touches: Array<{ x: number; y: number }>) => {
+  if (!touches.length) {
+    return { x: 0, y: 0 };
+  }
+
+  const total = touches.reduce(
+    (acc, touch) => ({
+      x: acc.x + touch.x,
+      y: acc.y + touch.y,
+    }),
+    { x: 0, y: 0 }
+  );
+
+  return {
+    x: total.x / touches.length,
+    y: total.y / touches.length,
+  };
+};
 
 // Todo: This should be done with expose of internal API similar to react-vtkjs-viewport
 // Then we don't need to worry about the re-renders if the props change.
@@ -82,7 +135,21 @@ const OHIFCornerstoneViewport = React.memo(
 
     const [scrollbarHeight, setScrollbarHeight] = useState('100px');
     const [enabledVPElement, setEnabledVPElement] = useState(null);
+    const [inputDebugInfo, setInputDebugInfo] = useState('');
+    const [contourDebugInfo, setContourDebugInfo] = useState('');
     const elementRef = useRef() as React.MutableRefObject<HTMLDivElement>;
+    const tabletGestureStateRef = useRef<{
+      mode: null | 'zoom' | 'scroll' | 'pan';
+      lastTouches?: Array<{ x: number; y: number }>;
+      lastDistance?: number;
+      scrollAccumulator: number;
+    }>({
+      mode: null,
+      scrollAccumulator: 0,
+    });
+    // Tracks whether an Apple Pencil (or other stylus) is currently in contact,
+    // used to suppress palm touch events while drawing.
+    const pencilActiveRef = useRef(false);
 
     const {
       displaySetService,
@@ -281,6 +348,413 @@ const OHIFCornerstoneViewport = React.memo(
       loadViewportData();
     }, [viewportOptions, displaySets, dataSource]);
 
+    useEffect(() => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+
+      const intervalId = window.setInterval(() => {
+        const latestContourDebug =
+          (window as Window & { __oviContourDebugInfo?: string }).__oviContourDebugInfo || '';
+        setContourDebugInfo(current => (current === latestContourDebug ? current : latestContourDebug));
+      }, 100);
+
+      return () => {
+        window.clearInterval(intervalId);
+      };
+    }, []);
+
+    useEffect(() => {
+      const element = elementRef.current;
+      if (!element || !isTouchCapableDevice()) {
+        return;
+      }
+
+      const getViewport = () => getEnabledElement(element)?.viewport;
+      const getActiveToolName = () => {
+        const viewportInfo = cornerstoneViewportService.getViewportInfo(viewportId);
+        const toolGroupId = viewportInfo?.getToolGroupId?.();
+        if (!toolGroupId) {
+          return null;
+        }
+
+        return toolGroupService.getActivePrimaryMouseButtonTool?.(toolGroupId) || null;
+      };
+
+      const isContourMode = () => {
+        const activeTool = getActiveToolName();
+        return activeTool === 'ManualContour' || activeTool === 'MaskContour';
+      };
+
+      const shouldHandleTouchGesture = () => {
+        const activeTool = getActiveToolName();
+        return (
+          activeTool !== 'Length' &&
+          activeTool !== 'Bidirectional' &&
+          activeTool !== 'Probe' &&
+          activeTool !== 'DebugProbe' &&
+          activeTool !== 'EllipticalROI' &&
+          activeTool !== 'CircleROI' &&
+          activeTool !== 'RectangleROI' &&
+          activeTool !== 'RotatableRectangleROI' &&
+          activeTool !== 'CalibrationLine'
+        );
+      };
+
+      const resetGestureState = () => {
+        tabletGestureStateRef.current = {
+          mode: null,
+          scrollAccumulator: 0,
+        };
+      };
+
+      const handlePencilDown = (event: PointerEvent) => {
+        setInputDebugInfo(
+          `pointerdown:${event.pointerType || 'unknown'} touches=0 activeTool=${getActiveToolName() || 'none'}`
+        );
+        if (event.pointerType === 'pen') {
+          pencilActiveRef.current = true;
+        }
+      };
+      const handlePencilUp = (event: PointerEvent) => {
+        setInputDebugInfo(
+          `${event.type}:${event.pointerType || 'unknown'} touches=0 activeTool=${getActiveToolName() || 'none'}`
+        );
+        if (event.pointerType === 'pen') {
+          pencilActiveRef.current = false;
+        }
+      };
+
+      const formatTouchDebug = (event: TouchEvent) => {
+        const firstTouch = event.touches[0] || event.changedTouches[0];
+        const inferredType = touchListContainsStylus(event.touches) || touchListContainsStylus(event.changedTouches)
+          ? 'stylus'
+          : touchListContainsDirect(event.touches) || touchListContainsDirect(event.changedTouches)
+            ? 'direct'
+            : 'finger';
+        const touchType = getTouchType(firstTouch) || inferredType;
+        return `${event.type}:${touchType} touches=${event.touches.length} changed=${event.changedTouches.length} pencil=${pencilActiveRef.current ? 'yes' : 'no'} activeTool=${getActiveToolName() || 'none'}`;
+      };
+
+      const handleTouchStart = (event: TouchEvent) => {
+        const isStylusTouch = touchListContainsStylus(event.touches);
+        const isDirectTouch = touchListContainsDirect(event.touches);
+        setInputDebugInfo(formatTouchDebug(event));
+
+        if (isContourMode() && isDirectTouch) {
+          if (event.touches.length >= 2) {
+            const touches = getTouchArray(event.touches);
+            const state = tabletGestureStateRef.current;
+            state.mode = null;
+            state.lastTouches = touches.map(normalizeTouchPoint);
+            state.lastDistance = getTouchDistance(touches);
+            state.scrollAccumulator = 0;
+          } else {
+            resetGestureState();
+          }
+
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+
+        // Palm rejection: suppress finger-only touches while pencil is in contact,
+        // but still allow stylus-originated touch events to reach the drawing tool.
+        if (pencilActiveRef.current && !isStylusTouch) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          resetGestureState();
+          return;
+        }
+        if (!shouldHandleTouchGesture()) {
+          resetGestureState();
+          return;
+        }
+
+        const touches = getTouchArray(event.touches);
+        if (!touches.length) {
+          return;
+        }
+
+        const state = tabletGestureStateRef.current;
+        if (touches.length === 2) {
+          state.mode = null;
+          state.lastTouches = touches.map(normalizeTouchPoint);
+          state.lastDistance = getTouchDistance(touches);
+          state.scrollAccumulator = 0;
+          event.preventDefault();
+          return;
+        }
+
+        resetGestureState();
+      };
+
+      const handleTouchMove = (event: TouchEvent) => {
+        const isStylusTouch = touchListContainsStylus(event.touches);
+        const isDirectTouch = touchListContainsDirect(event.touches);
+        setInputDebugInfo(formatTouchDebug(event));
+
+        if (isContourMode() && isDirectTouch) {
+          const viewport = getViewport();
+          if (!viewport) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+          }
+
+          const touches = getTouchArray(event.touches);
+          const state = tabletGestureStateRef.current;
+
+          if (touches.length >= 2 && state.lastTouches?.length >= 2) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+
+            const previousTouches = state.lastTouches.slice(0, 2);
+            const currentTouches = touches.slice(0, 2).map(normalizeTouchPoint);
+            const currentDistance = getTouchDistance(touches.slice(0, 2) as Touch[]);
+            const distanceDelta = currentDistance - (state.lastDistance || currentDistance);
+
+            const touchOneDx = currentTouches[0].x - previousTouches[0].x;
+            const touchOneDy = currentTouches[0].y - previousTouches[0].y;
+            const touchTwoDx = currentTouches[1].x - previousTouches[1].x;
+            const touchTwoDy = currentTouches[1].y - previousTouches[1].y;
+            const averageDx = (touchOneDx + touchTwoDx) / 2;
+            const averageDy = (touchOneDy + touchTwoDy) / 2;
+            const averageMotion = Math.hypot(averageDx, averageDy);
+            const sameDirectionVerticalMotion = touchOneDy * touchTwoDy > 0;
+            const sameDirectionMotion = touchOneDx * touchTwoDx + touchOneDy * touchTwoDy > 0;
+            const parallelVerticalMotion =
+              sameDirectionVerticalMotion &&
+              Math.abs(averageDy) >= TABLET_SCROLL_LOCK_THRESHOLD_PX &&
+              Math.abs(averageDy) > Math.abs(averageDx) * 1.5 &&
+              Math.abs(touchOneDx) <= TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX &&
+              Math.abs(touchTwoDx) <= TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX &&
+              Math.abs(touchOneDy - touchTwoDy) <= TABLET_SCROLL_MAX_VERTICAL_DELTA_MISMATCH_PX &&
+              Math.abs(distanceDelta) <= TABLET_ZOOM_THRESHOLD_PX;
+            const pinchZoomMotion =
+              Math.abs(distanceDelta) >= TABLET_ZOOM_LOCK_THRESHOLD_PX &&
+              Math.abs(distanceDelta) > averageMotion * 0.75;
+            const panMotion =
+              sameDirectionMotion &&
+              averageMotion >= TABLET_PAN_LOCK_THRESHOLD_PX &&
+              Math.max(Math.abs(averageDx), Math.abs(averageDy)) >= TABLET_PAN_LOCK_THRESHOLD_PX &&
+              Math.abs(averageDy) < Math.abs(averageDx) * 1.35 &&
+              !parallelVerticalMotion &&
+              !pinchZoomMotion;
+
+            if (parallelVerticalMotion) {
+              state.mode = 'scroll';
+            } else if (pinchZoomMotion) {
+              state.mode = 'zoom';
+            } else if (panMotion) {
+              state.mode = 'pan';
+            } else if (!state.mode) {
+              state.lastTouches = currentTouches;
+              state.lastDistance = currentDistance;
+              return;
+            }
+
+            if (state.mode === 'scroll') {
+              state.scrollAccumulator += averageDy;
+
+              while (Math.abs(state.scrollAccumulator) >= TABLET_SCROLL_STEP_PX) {
+                const direction = state.scrollAccumulator > 0 ? 1 : -1;
+                csUtils.scroll(viewport, { delta: direction });
+                state.scrollAccumulator -= TABLET_SCROLL_STEP_PX * direction;
+              }
+            } else if (state.mode === 'zoom') {
+              const currentCamera = viewport.getCamera?.();
+              const parallelScale = currentCamera?.parallelScale;
+              if (parallelScale && state.lastDistance && currentDistance > 0) {
+                viewport.setCamera({
+                  parallelScale: parallelScale * (state.lastDistance / currentDistance),
+                });
+                viewport.render();
+              }
+            } else if (state.mode === 'pan') {
+              const rect = element.getBoundingClientRect();
+              const previousCenter = getTouchCenter(previousTouches);
+              const currentCenter = getTouchCenter(currentTouches);
+              const previousCanvasPoint = [previousCenter.x - rect.left, previousCenter.y - rect.top];
+              const currentCanvasPoint = [currentCenter.x - rect.left, currentCenter.y - rect.top];
+              const previousWorldPoint = viewport.canvasToWorld?.(previousCanvasPoint);
+              const currentWorldPoint = viewport.canvasToWorld?.(currentCanvasPoint);
+              const currentCamera = viewport.getCamera?.();
+
+              if (
+                previousWorldPoint &&
+                currentWorldPoint &&
+                currentCamera?.focalPoint &&
+                currentCamera?.position
+              ) {
+                const worldDelta = [
+                  previousWorldPoint[0] - currentWorldPoint[0],
+                  previousWorldPoint[1] - currentWorldPoint[1],
+                  previousWorldPoint[2] - currentWorldPoint[2],
+                ];
+
+                viewport.setCamera({
+                  focalPoint: currentCamera.focalPoint.map(
+                    (value, index) => value + worldDelta[index]
+                  ),
+                  position: currentCamera.position.map((value, index) => value + worldDelta[index]),
+                });
+                viewport.render();
+              }
+            }
+
+            state.lastTouches = currentTouches;
+            state.lastDistance = currentDistance;
+            return;
+          }
+
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          resetGestureState();
+          return;
+        }
+
+        if (pencilActiveRef.current && !isStylusTouch) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (!shouldHandleTouchGesture()) {
+          return;
+        }
+
+        const viewport = getViewport();
+        if (!viewport) {
+          return;
+        }
+
+        const touches = getTouchArray(event.touches);
+        const state = tabletGestureStateRef.current;
+
+        if (touches.length === 2 && state.lastTouches?.length === 2) {
+          event.preventDefault();
+
+          const previousTouches = state.lastTouches;
+          const currentTouches = touches.map(normalizeTouchPoint);
+          const currentDistance = getTouchDistance(touches);
+          const distanceDelta = currentDistance - (state.lastDistance || currentDistance);
+
+          const touchOneDx = currentTouches[0].x - previousTouches[0].x;
+          const touchOneDy = currentTouches[0].y - previousTouches[0].y;
+          const touchTwoDx = currentTouches[1].x - previousTouches[1].x;
+          const touchTwoDy = currentTouches[1].y - previousTouches[1].y;
+          const averageDx = (touchOneDx + touchTwoDx) / 2;
+          const averageDy = (touchOneDy + touchTwoDy) / 2;
+          const averageMotion = Math.hypot(averageDx, averageDy);
+          const sameDirectionVerticalMotion = touchOneDy * touchTwoDy > 0;
+          const sameDirectionMotion = touchOneDx * touchTwoDx + touchOneDy * touchTwoDy > 0;
+          const parallelVerticalMotion =
+            sameDirectionVerticalMotion &&
+            Math.abs(averageDy) >= TABLET_SCROLL_LOCK_THRESHOLD_PX &&
+            Math.abs(averageDy) > Math.abs(averageDx) * 1.5 &&
+            Math.abs(touchOneDx) <= TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX &&
+            Math.abs(touchTwoDx) <= TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX &&
+            Math.abs(touchOneDy - touchTwoDy) <= TABLET_SCROLL_MAX_VERTICAL_DELTA_MISMATCH_PX &&
+            Math.abs(distanceDelta) <= TABLET_ZOOM_THRESHOLD_PX;
+          const pinchZoomMotion =
+            Math.abs(distanceDelta) >= TABLET_ZOOM_LOCK_THRESHOLD_PX &&
+            Math.abs(distanceDelta) > averageMotion * 0.75;
+          const panMotion =
+            sameDirectionMotion &&
+            averageMotion >= TABLET_PAN_LOCK_THRESHOLD_PX &&
+            Math.max(Math.abs(averageDx), Math.abs(averageDy)) >= TABLET_PAN_LOCK_THRESHOLD_PX &&
+            Math.abs(averageDy) < Math.abs(averageDx) * 1.35 &&
+            !parallelVerticalMotion &&
+            !pinchZoomMotion;
+
+          if (parallelVerticalMotion) {
+            state.mode = 'scroll';
+          } else if (pinchZoomMotion) {
+            state.mode = 'zoom';
+          } else if (panMotion) {
+            state.mode = 'pan';
+          } else if (!state.mode) {
+            state.lastTouches = currentTouches;
+            state.lastDistance = currentDistance;
+            return;
+          }
+
+          if (state.mode === 'scroll') {
+            state.scrollAccumulator += averageDy;
+
+            while (Math.abs(state.scrollAccumulator) >= TABLET_SCROLL_STEP_PX) {
+              const direction = state.scrollAccumulator > 0 ? 1 : -1;
+              csUtils.scroll(viewport, { delta: direction });
+              state.scrollAccumulator -= TABLET_SCROLL_STEP_PX * direction;
+            }
+          } else if (state.mode === 'zoom') {
+            const currentCamera = viewport.getCamera?.();
+            const parallelScale = currentCamera?.parallelScale;
+            if (parallelScale && state.lastDistance && currentDistance > 0) {
+              viewport.setCamera({
+                parallelScale: parallelScale * (state.lastDistance / currentDistance),
+              });
+              viewport.render();
+            }
+          } else if (state.mode === 'pan') {
+            const rect = element.getBoundingClientRect();
+            const previousCenter = getTouchCenter(previousTouches);
+            const currentCenter = getTouchCenter(currentTouches);
+            const previousCanvasPoint = [previousCenter.x - rect.left, previousCenter.y - rect.top];
+            const currentCanvasPoint = [currentCenter.x - rect.left, currentCenter.y - rect.top];
+            const previousWorldPoint = viewport.canvasToWorld?.(previousCanvasPoint);
+            const currentWorldPoint = viewport.canvasToWorld?.(currentCanvasPoint);
+            const currentCamera = viewport.getCamera?.();
+
+            if (previousWorldPoint && currentWorldPoint && currentCamera?.focalPoint && currentCamera?.position) {
+              const worldDelta = [
+                previousWorldPoint[0] - currentWorldPoint[0],
+                previousWorldPoint[1] - currentWorldPoint[1],
+                previousWorldPoint[2] - currentWorldPoint[2],
+              ];
+
+              viewport.setCamera({
+                focalPoint: currentCamera.focalPoint.map((value, index) => value + worldDelta[index]),
+                position: currentCamera.position.map((value, index) => value + worldDelta[index]),
+              });
+              viewport.render();
+            }
+          }
+
+          state.lastTouches = currentTouches;
+          state.lastDistance = currentDistance;
+          return;
+        }
+      };
+
+      const handleTouchEnd = (event: TouchEvent) => {
+        setInputDebugInfo(formatTouchDebug(event));
+        if (isContourMode() && touchListContainsDirect(event.changedTouches)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        resetGestureState();
+      };
+
+      element.addEventListener('pointerdown', handlePencilDown);
+      element.addEventListener('pointerup', handlePencilUp);
+      element.addEventListener('pointercancel', handlePencilUp);
+      element.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
+      element.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
+      element.addEventListener('touchend', handleTouchEnd, { passive: false, capture: true });
+      element.addEventListener('touchcancel', handleTouchEnd, { passive: false, capture: true });
+
+      return () => {
+        element.removeEventListener('pointerdown', handlePencilDown);
+        element.removeEventListener('pointerup', handlePencilUp);
+        element.removeEventListener('pointercancel', handlePencilUp);
+        element.removeEventListener('touchstart', handleTouchStart, true);
+        element.removeEventListener('touchmove', handleTouchMove, true);
+        element.removeEventListener('touchend', handleTouchEnd, true);
+        element.removeEventListener('touchcancel', handleTouchEnd, true);
+      };
+    }, [viewportId, cornerstoneViewportService, toolGroupService]);
+
     /**
      * There are two scenarios for jump to click
      * 1. Current viewports contain the displaySet that the annotation was drawn on
@@ -399,6 +873,10 @@ const OHIFCornerstoneViewport = React.memo(
               onKeyPress={viewportDialogState.onKeyPress}
             />
           )}
+        </div>
+        <div className="pointer-events-none absolute left-2 top-2 z-40 max-w-[80%] rounded bg-black/70 px-2 py-1 font-mono text-[10px] leading-tight text-white">
+          <div>{inputDebugInfo || 'input: idle'}</div>
+          <div>{contourDebugInfo || 'contour: idle'}</div>
         </div>
         {/* The OHIFViewportActionCorners follows the viewport in the DOM so that it is naturally at a higher z-index.*/}
         <OHIFViewportActionCorners viewportId={viewportId} />

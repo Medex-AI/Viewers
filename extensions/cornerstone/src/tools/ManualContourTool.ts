@@ -14,6 +14,10 @@ interface ContourAnnotation {
   annotationUID?: string;
   metadata?: any;
   data: {
+    labelColor?: string;
+    fillColor?: string;
+    fillOpacity?: number;
+    renderFill?: boolean;
     contour?: {
       polyline: Types.Point3[];
       closed: boolean;
@@ -27,6 +31,40 @@ interface ContourAnnotation {
   isLocked?: boolean;
   isVisible?: boolean;
 }
+
+const getRuntimeActiveLabelId = () =>
+  typeof window !== 'undefined'
+    ? (window as Window & { __oviActiveManualContourLabelId?: string }).__oviActiveManualContourLabelId
+    : undefined;
+
+const setContourDebugInfo = (message: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  (window as Window & { __oviContourDebugInfo?: string }).__oviContourDebugInfo = message;
+};
+
+const describeAnnotation = (annotationToDescribe?: ContourAnnotation | null) => {
+  if (!annotationToDescribe) {
+    return 'none';
+  }
+
+  return `${annotationToDescribe.annotationUID || 'no-uid'}:${annotationToDescribe.data?.labelId || 'no-label'}`;
+};
+
+const isStylusTouchInteraction = (evt: any) => {
+  const event = evt?.detail?.event;
+  const touches = event?.touches || [];
+  const changedTouches = event?.changedTouches || [];
+
+  return (
+    Array.from(touches).some((touch: Touch & { touchType?: string }) => touch?.touchType === 'stylus') ||
+    Array.from(changedTouches).some(
+      (touch: Touch & { touchType?: string }) => touch?.touchType === 'stylus'
+    )
+  );
+};
 
 class ManualContourTool extends PlanarFreehandROITool {
   static toolName = 'ManualContour';
@@ -70,17 +108,66 @@ class ManualContourTool extends PlanarFreehandROITool {
 
     this.configuration.calculateStats = false;
     this.configuration.allowOpenContours = false;
-    this.configuration.showHandles = true;
-    this.configuration.drawHandles = true;
+    this.configuration.showHandles = false;
+    this.configuration.drawHandles = false;
     this.configuration.handleRadius = 4;
 
     registerPencilCursor();
 
     this._rightClickElementListeners = new Map();
-    const baseMouseMoveCallback = this.mouseMoveCallback.bind(this);
-    const baseRenderAnnotation = this.renderAnnotation.bind(this);
+    const baseAddNewAnnotation = this.addNewAnnotation.bind(this);
     const baseToolSelectedCallback = this.toolSelectedCallback.bind(this);
     const baseHandleSelectedCallback = this.handleSelectedCallback.bind(this);
+    const baseMouseMoveCallback = this.mouseMoveCallback.bind(this);
+    const baseRenderAnnotation = this.renderAnnotation.bind(this);
+
+    this.addNewAnnotation = evt => {
+      const selected = annotation.selection.getAnnotationsSelected?.() || [];
+      setContourDebugInfo(
+        `addNew active=${getRuntimeActiveLabelId() || 'none'} selected=${selected.join(',') || 'none'}`
+      );
+      return baseAddNewAnnotation(evt);
+    };
+
+    this.toolSelectedCallback = (evt, selectedAnnotation, interactionType, canvasCoords) => {
+      if (interactionType === 'Touch' && isStylusTouchInteraction(evt)) {
+        const selected = annotation.selection.getAnnotationsSelected?.() || [];
+        selected.forEach(uid => annotation.selection.setAnnotationSelected(uid, false));
+        setContourDebugInfo(
+          `toolSelected->addNew active=${getRuntimeActiveLabelId() || 'none'} picked=${describeAnnotation(
+            selectedAnnotation as ContourAnnotation
+          )} interaction=${interactionType}`
+        );
+        return this.addNewAnnotation(evt);
+      }
+
+      setContourDebugInfo(
+        `toolSelected active=${getRuntimeActiveLabelId() || 'none'} picked=${describeAnnotation(
+          selectedAnnotation as ContourAnnotation
+        )} interaction=${interactionType || 'unknown'}`
+      );
+      return baseToolSelectedCallback(evt, selectedAnnotation, interactionType, canvasCoords);
+    };
+
+    this.handleSelectedCallback = (evt, selectedAnnotation, handle, interactionType) => {
+      if (interactionType === 'Touch' && isStylusTouchInteraction(evt)) {
+        const selected = annotation.selection.getAnnotationsSelected?.() || [];
+        selected.forEach(uid => annotation.selection.setAnnotationSelected(uid, false));
+        setContourDebugInfo(
+          `handleSelected->addNew active=${getRuntimeActiveLabelId() || 'none'} picked=${describeAnnotation(
+            selectedAnnotation as ContourAnnotation
+          )} interaction=${interactionType}`
+        );
+        return this.addNewAnnotation(evt);
+      }
+
+      setContourDebugInfo(
+        `handleSelected active=${getRuntimeActiveLabelId() || 'none'} picked=${describeAnnotation(
+          selectedAnnotation as ContourAnnotation
+        )} handle=${handle?.index ?? 'unknown'} interaction=${interactionType || 'unknown'}`
+      );
+      return baseHandleSelectedCallback(evt, selectedAnnotation, handle, interactionType);
+    };
 
     this._dragHandleCallback = evt => {
       const eventDetail = evt.detail;
@@ -326,114 +413,6 @@ class ManualContourTool extends PlanarFreehandROITool {
       }
     };
 
-    this.toolSelectedCallback = (evt, selectedAnnotation) => {
-      const element = evt.detail?.element;
-      const canvasCoords = evt.detail?.currentPoints?.canvas;
-      if (!element || !canvasCoords) {
-        baseToolSelectedCallback(evt, selectedAnnotation);
-        return;
-      }
-
-      const annotation = selectedAnnotation as ContourAnnotation;
-      const contourPoints = annotation?.data?.contour?.polyline || [];
-      const enabledElement = getEnabledElement(element);
-      const { viewport } = enabledElement;
-
-      // Check if clicking on a handle
-      const handleIndex = findNearestHandle(contourPoints, canvasCoords, viewport, HANDLE_PROXIMITY);
-
-      // If not on a handle, check if near contour for moving
-      if (handleIndex === null) {
-        const isClosed = annotation.data?.contour?.closed || false;
-        const nearContour = isPointNearContour(
-          contourPoints,
-          canvasCoords,
-          viewport,
-          HANDLE_PROXIMITY,
-          isClosed
-        );
-
-        if (nearContour) {
-          const viewportIdsToRender = utilities.viewportFilters.getViewportIdsWithToolToRender(
-            element,
-            this.getToolName()
-          );
-          this._contourMoveData = {
-            annotation,
-            viewportIdsToRender,
-          };
-          this._activateContourMove(element);
-          const grabCursor = cursors.MouseCursor.getDefinedCursor('grab');
-          if (grabCursor) {
-            cursors.elementCursor.setElementCursor(element, grabCursor);
-          }
-          evt.preventDefault();
-          utilities.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
-          return;
-        }
-      }
-
-      baseToolSelectedCallback(evt, selectedAnnotation);
-    };
-
-    this.getHandleNearImagePoint = (element, currentAnnotation, canvasCoords, proximity) => {
-      const annotation = currentAnnotation as ContourAnnotation;
-      const contourPoints = annotation?.data?.contour?.polyline || [];
-      if (!contourPoints.length) {
-        annotation.data.handles.activeHandleIndex = null;
-        return;
-      }
-
-      const enabledElement = getEnabledElement(element);
-      const { viewport } = enabledElement;
-
-      const handleIndex = findNearestHandle(contourPoints, canvasCoords, viewport, proximity);
-
-      if (handleIndex === null) {
-        annotation.data.handles.activeHandleIndex = null;
-        return;
-      }
-
-      annotation.data.handles.activeHandleIndex = handleIndex;
-      return contourPoints[handleIndex];
-    };
-
-    this.handleSelectedCallback = (evt, selectedAnnotation, handle) => {
-      const element = evt.detail?.element;
-      const annotation = selectedAnnotation as ContourAnnotation;
-      const contourPoints = annotation?.data?.contour?.polyline || [];
-      if (contourPoints.length) {
-        annotation.data.handles.points = contourPoints;
-      }
-      const handleIndex = annotation?.data?.handles?.activeHandleIndex;
-
-      if (!element || handleIndex === undefined || handleIndex === null) {
-        baseHandleSelectedCallback(evt, selectedAnnotation, handle);
-        return;
-      }
-
-      const viewportIdsToRender = utilities.viewportFilters.getViewportIdsWithToolToRender(
-        element,
-        this.getToolName()
-      );
-
-      this._handleEditData = {
-        annotation,
-        handleIndex,
-        viewportIdsToRender,
-      };
-
-      this._activateHandleEdit(element);
-
-      const crosshairCursor = cursors.MouseCursor.getDefinedCursor('crosshair');
-      if (crosshairCursor) {
-        cursors.elementCursor.setElementCursor(element, crosshairCursor);
-      }
-
-      evt.preventDefault();
-      utilities.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
-    };
-
     this.mouseMoveCallback = (evt, filteredAnnotations) => {
       const { element, currentPoints } = evt.detail || {};
       if (!element || !currentPoints?.canvas) {
@@ -448,95 +427,13 @@ class ManualContourTool extends PlanarFreehandROITool {
       // Only set cursor if this tool is active
       const isToolActive = this.mode === 'Active';
 
-      const enabledElement = getEnabledElement(element);
-      const { viewport } = enabledElement;
-      const canvasCoords = currentPoints.canvas;
-      let cursorName = null;
-      let shouldRender = false;
-      const previousHoveredHandle = this._hoveredHandle;
       this._hoveredHandle = undefined;
-
-      if (filteredAnnotations?.length) {
-        for (const currentAnnotation of filteredAnnotations as ContourAnnotation[]) {
-          if (!currentAnnotation || currentAnnotation.isLocked || !currentAnnotation.isVisible) {
-            continue;
-          }
-
-          const contourPoints = currentAnnotation?.data?.contour?.polyline || [];
-
-          // Check if hovering over a handle
-          const handleIndex = findNearestHandle(contourPoints, canvasCoords, viewport, HANDLE_PROXIMITY);
-
-          if (handleIndex !== null) {
-            cursorName = 'crosshair';
-            this._hoveredHandle = {
-              annotationUID: currentAnnotation.annotationUID || '',
-              handleIndex: handleIndex,
-            };
-            currentAnnotation.data.handles.activeHandleIndex = handleIndex;
-            break;
-          }
-
-          currentAnnotation.data.handles.activeHandleIndex = null;
-
-          // Check if near contour edge
-          if (contourPoints.length) {
-            const isClosed = currentAnnotation.data?.contour?.closed || false;
-            const nearContour = isPointNearContour(
-              contourPoints,
-              canvasCoords,
-              viewport,
-              HANDLE_PROXIMITY,
-              isClosed
-            );
-            if (nearContour) {
-              cursorName = 'grab';
-              break;
-            }
-          }
-
-          const nearTool = this.isPointNearTool(
-            element,
-            currentAnnotation as any,
-            canvasCoords,
-            HANDLE_PROXIMITY
-          );
-
-          if (nearTool) {
-            cursorName = 'grab';
-            break;
-          }
-        }
-      }
-
-      // Check if hovered handle changed
-      if (
-        (previousHoveredHandle?.annotationUID !== this._hoveredHandle?.annotationUID) ||
-        (previousHoveredHandle?.handleIndex !== this._hoveredHandle?.handleIndex)
-      ) {
-        shouldRender = true;
-      }
-
-      if (cursorName) {
-        const cursor = cursors.MouseCursor.getDefinedCursor(cursorName);
-        if (cursor) {
-          cursors.elementCursor.setElementCursor(element, cursor);
-        }
-      } else if (isToolActive) {
+      if (isToolActive) {
         // Set crosshair cursor for annotation tool when not over any handle or annotation (only if tool is active)
         const crosshairCursor = cursors.MouseCursor.getDefinedCursor('crosshair');
         if (crosshairCursor) {
           cursors.elementCursor.setElementCursor(element, crosshairCursor);
         }
-      }
-
-      // Trigger render if hovered handle changed
-      if (shouldRender) {
-        const viewportIdsToRender = utilities.viewportFilters.getViewportIdsWithToolToRender(
-          element,
-          this.getToolName()
-        );
-        utilities.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
       }
 
       return baseMouseMoveCallback(evt, filteredAnnotations);
@@ -558,11 +455,10 @@ class ManualContourTool extends PlanarFreehandROITool {
         return renderStatus;
       }
 
-      const styleSpecifier = {
+      const styleSpecifier: Record<string, string> = {
         toolGroupId: this.toolGroupId,
         toolName: this.getToolName(),
         viewportId: enabledElement.viewport.id,
-        annotationUID: '',
       };
 
       for (const currentAnnotation of annotations as ContourAnnotation[]) {
@@ -573,85 +469,77 @@ class ManualContourTool extends PlanarFreehandROITool {
 
         currentAnnotation.data.handles.points = contourPoints;
 
-        // Convert all contour points to canvas points for handles
-        const handleCanvasPoints = contourPoints.map((point: Types.Point3) => viewport.worldToCanvas(point));
-        const activeHandleIndex = currentAnnotation.data?.handles?.activeHandleIndex;
-
-        styleSpecifier.annotationUID = currentAnnotation.annotationUID;
-        const { color, lineWidth } = this.getAnnotationStyle({
+        styleSpecifier.annotationUID = currentAnnotation.annotationUID || '';
+        const { fillColor, fillOpacity, renderFill } = this.getAnnotationStyle({
           annotation: currentAnnotation as any,
           styleSpecifier,
-        });
-        const highlightColor = this.getStyle(
-          'colorHighlighted',
-          styleSpecifier,
-          currentAnnotation as any
-        );
-        const handleRadius = this.configuration.handleRadius || 6;
+        }) as {
+          fillColor?: string;
+          fillOpacity?: number | string;
+          renderFill?: boolean;
+        };
 
-        // Draw all handles with semi-transparent fill for visibility
-        drawing.drawHandles(
-          svgDrawingHelper,
-          currentAnnotation.annotationUID,
-          'contour-handles',
-          handleCanvasPoints,
-          {
-            color,
-            lineWidth,
-            handleRadius,
-            fill: color,
-            opacity: 0.6,
-          }
-        );
+        const resolvedFillColor = currentAnnotation.data?.fillColor || fillColor;
+        const normalizedFillOpacity =
+          currentAnnotation.data?.fillOpacity ??
+          (typeof fillOpacity === 'string' ? parseFloat(fillOpacity) : fillOpacity) ??
+          DEFAULT_FILL_OPACITY;
+        const resolvedRenderFill = currentAnnotation.data?.renderFill ?? renderFill ?? true;
 
-        // Highlight hovered handle
         if (
-          this._hoveredHandle &&
-          this._hoveredHandle.annotationUID === currentAnnotation.annotationUID &&
-          this._hoveredHandle.handleIndex >= 0 &&
-          this._hoveredHandle.handleIndex < handleCanvasPoints.length
+          currentAnnotation.data?.contour?.closed &&
+          resolvedRenderFill !== false &&
+          normalizedFillOpacity &&
+          normalizedFillOpacity > 0 &&
+          contourPoints.length >= 3
         ) {
-          const hoveredHandle = handleCanvasPoints[this._hoveredHandle.handleIndex];
-          if (hoveredHandle) {
-            drawing.drawHandles(
-              svgDrawingHelper,
-              currentAnnotation.annotationUID,
-              'contour-handles-hovered',
-              [hoveredHandle],
-              {
-                color: highlightColor || color,
-                lineWidth: lineWidth + 1,
-                handleRadius: handleRadius + 2,
-                fill: highlightColor || color,
-                opacity: 0.9,
-              }
-            );
-          }
-        }
-
-        // Highlight active (being dragged) handle
-        if (activeHandleIndex !== null && activeHandleIndex !== undefined) {
-          const activeHandle = handleCanvasPoints[activeHandleIndex];
-          if (activeHandle) {
-            drawing.drawHandles(
-              svgDrawingHelper,
-              currentAnnotation.annotationUID,
-              'contour-handles-active',
-              [activeHandle],
-              {
-                color: highlightColor || color,
-                lineWidth: lineWidth + 1,
-                handleRadius: handleRadius + 3,
-                fill: highlightColor || color,
-                opacity: 1.0,
-              }
-            );
-          }
+          const canvasPoints = contourPoints.map(point => viewport.worldToCanvas(point));
+          drawContourFill(
+            svgDrawingHelper,
+            currentAnnotation.annotationUID || '',
+            canvasPoints,
+            resolvedFillColor || currentAnnotation.data?.labelColor,
+            normalizedFillOpacity
+          );
         }
       }
 
       return renderStatus;
     };
+  }
+
+  private _annotationMatchesActiveLabel(annotationToTest: ContourAnnotation) {
+    const activeLabelId = getRuntimeActiveLabelId();
+    const annotationLabelId = annotationToTest?.data?.labelId;
+
+    if (!activeLabelId || !annotationLabelId) {
+      setContourDebugInfo(
+        `labelCheck active=${activeLabelId || 'none'} candidate=${describeAnnotation(annotationToTest)} result=allow`
+      );
+      return true;
+    }
+
+    const matches = annotationLabelId === activeLabelId;
+    setContourDebugInfo(
+      `labelCheck active=${activeLabelId} candidate=${describeAnnotation(annotationToTest)} result=${matches ? 'allow' : 'reject'}`
+    );
+    return matches;
+  }
+
+  isPointNearTool(element, annotationToTest, canvasCoords, proximity) {
+    if (!this._annotationMatchesActiveLabel(annotationToTest as ContourAnnotation)) {
+      return false;
+    }
+
+    return super.isPointNearTool(element, annotationToTest, canvasCoords, proximity);
+  }
+
+  getHandleNearImagePoint(element, annotationToTest, canvasCoords, proximity) {
+    if (!this._annotationMatchesActiveLabel(annotationToTest as ContourAnnotation)) {
+      return null;
+    }
+
+    return super.getHandleNearImagePoint(element, annotationToTest, canvasCoords, proximity);
   }
 
   private _attachRightClickListener(element: HTMLElement) {
@@ -753,11 +641,13 @@ class ManualContourTool extends PlanarFreehandROITool {
     const isClosed = contourAnnotation.data?.contour?.closed || false;
 
     if (contourPoints.length > MIN_CONTROL_POINTS) {
-      // Resample to equidistant control points with large spacing
-      const resampled = resampleContourEquidistant(contourPoints, TARGET_POINT_SPACING, isClosed);
-      if (resampled.length >= MIN_CONTROL_POINTS) {
-        contourAnnotation.data.contour.polyline = resampled;
-        contourAnnotation.data.handles.points = resampled;
+      const smoothed = smoothContourGeometry(contourPoints, isClosed);
+      const resampled = resampleContourEquidistant(smoothed, TARGET_POINT_SPACING, isClosed);
+      const finalized = smoothContourGeometry(resampled, isClosed);
+
+      if (finalized.length >= MIN_CONTROL_POINTS) {
+        contourAnnotation.data.contour.polyline = finalized;
+        contourAnnotation.data.handles.points = finalized;
         contourAnnotation.invalidated = true;
 
         // Trigger re-render
@@ -781,6 +671,9 @@ export default ManualContourTool;
 const HANDLE_PROXIMITY = 6; // Handle selection range in pixels
 const TARGET_POINT_SPACING = 5.0; // Target spacing between control points in world units (mm)
 const MIN_CONTROL_POINTS = 4;
+const DEFAULT_FILL_OPACITY = 0.2;
+const SMOOTHING_ITERATIONS = 2;
+const OPEN_CONTOUR_SMOOTHING_WEIGHT = 0.2;
 const SOFT_DRAG_RADIUS = 3; // Number of neighboring points affected during drag
 const SOFT_DRAG_DECAY = 0.8; // Exponential decay factor for neighbor influence
 const PENCIL_CURSOR_NAME = 'ManualContour.Pencil';
@@ -800,6 +693,52 @@ function registerPencilCursor() {
     { x: 64, y: 64 }
   );
   isPencilCursorRegistered = true;
+}
+
+function drawContourFill(
+  svgDrawingHelper,
+  annotationUID: string,
+  canvasPoints: Types.Point2[],
+  fillColor: string,
+  fillOpacity: number
+) {
+  if (!annotationUID || !canvasPoints?.length || !fillColor || fillOpacity <= 0) {
+    return;
+  }
+
+  const svgNodeHash = `${annotationUID}-fill`;
+  const existingPolygon = svgDrawingHelper.getSvgNode(svgNodeHash);
+  const points = canvasPoints.map(point => `${point[0]},${point[1]}`).join(' ');
+  const attributes = {
+    'data-id': svgNodeHash,
+    points,
+    fill: normalizeColor(fillColor),
+    'fill-opacity': `${Math.max(0, Math.min(1, fillOpacity))}`,
+    stroke: 'none',
+    'pointer-events': 'none',
+  };
+
+  if (existingPolygon) {
+    drawing.setAttributesIfNecessary(attributes, existingPolygon);
+    svgDrawingHelper.setNodeTouched(svgNodeHash);
+    return;
+  }
+
+  const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+  drawing.setNewAttributesIfValid(attributes, polygon);
+  svgDrawingHelper.appendNode(polygon, svgNodeHash);
+}
+
+function normalizeColor(color: string): string {
+  if (!color) {
+    return color;
+  }
+
+  if (color.startsWith('#') && (color.length === 9 || color.length === 5)) {
+    return color.slice(0, color.length - (color.length === 9 ? 2 : 1));
+  }
+
+  return color;
 }
 
 /**
@@ -832,36 +771,6 @@ function findNearestHandle(
   }
 
   return nearestIndex;
-}
-
-/**
- * Check if a point is near the contour (for moving the entire contour)
- */
-function isPointNearContour(
-  contourPoints: Types.Point3[],
-  canvasPoint: Types.Point2,
-  viewport: any,
-  proximity: number,
-  isClosed: boolean
-): boolean {
-  if (!contourPoints?.length) {
-    return false;
-  }
-
-  // Check proximity to any edge
-  const edgeCount = isClosed ? contourPoints.length : contourPoints.length - 1;
-
-  for (let i = 0; i < edgeCount; i++) {
-    const p1 = viewport.worldToCanvas(contourPoints[i]);
-    const p2 = viewport.worldToCanvas(contourPoints[(i + 1) % contourPoints.length]);
-
-    const distance = distanceToLineSegment(canvasPoint, p1, p2);
-    if (distance <= proximity) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 /**
@@ -994,6 +903,70 @@ function resampleContourEquidistant(
   }
 
   return resampled;
+}
+
+function smoothContourGeometry(points: Types.Point3[], isClosed: boolean): Types.Point3[] {
+  if (points.length < MIN_CONTROL_POINTS) {
+    return points.map(point => [...point] as Types.Point3);
+  }
+
+  let smoothed = points.map(point => [...point] as Types.Point3);
+
+  for (let i = 0; i < SMOOTHING_ITERATIONS; i++) {
+    smoothed = isClosed
+      ? chaikinSmoothClosedContour(smoothed)
+      : smoothOpenContour(smoothed, OPEN_CONTOUR_SMOOTHING_WEIGHT);
+  }
+
+  return smoothed;
+}
+
+function chaikinSmoothClosedContour(points: Types.Point3[]): Types.Point3[] {
+  if (points.length < 3) {
+    return points.map(point => [...point] as Types.Point3);
+  }
+
+  const smoothed: Types.Point3[] = [];
+
+  for (let i = 0; i < points.length; i++) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+
+    smoothed.push(interpolatePoint3(current, next, 0.25));
+    smoothed.push(interpolatePoint3(current, next, 0.75));
+  }
+
+  return smoothed;
+}
+
+function smoothOpenContour(points: Types.Point3[], weight: number): Types.Point3[] {
+  if (points.length < 3) {
+    return points.map(point => [...point] as Types.Point3);
+  }
+
+  const smoothed = points.map(point => [...point] as Types.Point3);
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const previous = points[i - 1];
+    const current = points[i];
+    const next = points[i + 1];
+
+    smoothed[i] = [
+      current[0] * (1 - 2 * weight) + (previous[0] + next[0]) * weight,
+      current[1] * (1 - 2 * weight) + (previous[1] + next[1]) * weight,
+      current[2] * (1 - 2 * weight) + (previous[2] + next[2]) * weight,
+    ];
+  }
+
+  return smoothed;
+}
+
+function interpolatePoint3(p1: Types.Point3, p2: Types.Point3, t: number): Types.Point3 {
+  return [
+    p1[0] + (p2[0] - p1[0]) * t,
+    p1[1] + (p2[1] - p1[1]) * t,
+    p1[2] + (p2[2] - p1[2]) * t,
+  ];
 }
 
 /**

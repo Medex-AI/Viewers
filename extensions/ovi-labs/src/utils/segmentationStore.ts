@@ -16,7 +16,8 @@ export const SEGMENTATION_LABELS = [
   { id: 'junctionalZone', name: 'Junctional zone', color: '#60A5FA' },
 ] as const;
 
-export type ModelType = 'manual' | 'threshold' | 'medsam' | 'unet_uterine';
+// Use string instead of fixed union to support dynamic models from backend
+export type ModelType = string;
 
 // Represents a single annotation on a specific time frame
 export interface AnnotationReference {
@@ -42,20 +43,25 @@ export const getFirstAnnotationUID = (label: SegmentationLabel): string | undefi
 export interface SegmentationState {
   activeModel: ModelType;
   labels: SegmentationLabel[];
-  labelsByModel: Record<ModelType, SegmentationLabel[]>;
+  labelsByModel: Record<string, SegmentationLabel[]>; // Dynamic models support
 }
 
-// Initial state
+// Helper to ensure model exists in labelsByModel
+const ensureModelInState = (model: string): void => {
+  if (!currentState.labelsByModel[model]) {
+    currentState.labelsByModel[model] = [];
+  }
+};
+
+// Initial state - only manual is guaranteed
 let currentState: SegmentationState = {
   activeModel: 'manual',
   labels: [],
   labelsByModel: {
     manual: [],
-    threshold: [],
-    medsam: [],
-    unet_uterine: [],
   },
 };
+const DEFAULT_LABEL_OPACITY = 0.2;
 
 type Subscriber = (state: SegmentationState) => void;
 const subscribers: Set<Subscriber> = new Set();
@@ -82,8 +88,9 @@ const triggerRender = () => {
 
 const applyModelVisibility = (model: ModelType): void => {
   const labelsByModel = currentState.labelsByModel;
-  (Object.keys(labelsByModel) as ModelType[]).forEach(method => {
-    labelsByModel[method].forEach(label => {
+  Object.keys(labelsByModel).forEach(method => {
+    const labels = labelsByModel[method] || [];
+    labels.forEach(label => {
       label.annotations.forEach(ref => {
         if (method === model && label.visible) {
           showContour(ref.annotationUID, label.color, label.opacity);
@@ -97,6 +104,8 @@ const applyModelVisibility = (model: ModelType): void => {
 
 // Set active model and update contour visibility accordingly
 export const setActiveModel = (model: ModelType): void => {
+  ensureModelInState(model); // Ensure model exists in state
+
   currentState = {
     ...currentState,
     activeModel: model,
@@ -119,10 +128,16 @@ const setContourVisibility = (annotationUID: string, visible: boolean): void => 
       // Also use style API to control visibility via opacity
       // When hidden, set fully transparent color
       if (!visible) {
+        if (annotationObj.data) {
+          annotationObj.data.fillOpacity = 0;
+          annotationObj.data.renderFill = false;
+        }
         annotation.config.style.setAnnotationStyles(annotationUID, {
           color: 'transparent',
           colorHighlighted: 'transparent',
           colorSelected: 'transparent',
+          fillOpacity: 0,
+          renderFill: false,
         });
       }
     }
@@ -138,8 +153,13 @@ const showContour = (annotationUID: string, color: string, opacity: number): voi
     if (annotationObj) {
       // Ensure annotation is visible
       annotationObj.isVisible = true;
+      if (annotationObj.data) {
+        annotationObj.data.fillColor = color;
+        annotationObj.data.fillOpacity = opacity;
+        annotationObj.data.renderFill = opacity > 0;
+      }
 
-      // Set color with opacity
+      // Restore visible contour styling and use opacity for the interior fill.
       setContourOpacity(annotationUID, color, opacity);
     }
   } catch (e) {
@@ -150,16 +170,19 @@ const showContour = (annotationUID: string, color: string, opacity: number): voi
 // Helper to set contour opacity via style
 const setContourOpacity = (annotationUID: string, color: string, opacity: number): void => {
   try {
-    // Convert opacity (0-1) to hex alpha (00-FF)
-    const alpha = Math.round(opacity * 255)
-      .toString(16)
-      .padStart(2, '0');
-    const colorWithAlpha = `${color}${alpha}`;
-
+    const annotationObj = annotation.state.getAnnotation(annotationUID);
+    if (annotationObj?.data) {
+      annotationObj.data.fillColor = color;
+      annotationObj.data.fillOpacity = opacity;
+      annotationObj.data.renderFill = opacity > 0;
+    }
     annotation.config.style.setAnnotationStyles(annotationUID, {
-      color: colorWithAlpha,
-      colorHighlighted: colorWithAlpha,
-      colorSelected: colorWithAlpha,
+      color,
+      colorHighlighted: color,
+      colorSelected: color,
+      fillColor: color,
+      fillOpacity: opacity,
+      renderFill: opacity > 0,
     });
   } catch (e) {
     console.warn('Failed to set contour opacity:', e);
@@ -346,12 +369,7 @@ export const deleteLabel = deleteAllTimePoints;
 // Creates ONE label per labelId (anatomical class), with multiple annotations for different time frames
 export const syncLabelsFromAnnotations = (contours: any[]): void => {
   // Group contours by modelType + labelId, keeping ALL time frames (one annotation per frame)
-  const labelsByModel: Record<ModelType, Map<string, AnnotationReference[]>> = {
-    manual: new Map(),
-    threshold: new Map(),
-    medsam: new Map(),
-    unet_uterine: new Map(),
-  };
+  const labelsByModel: Record<string, Map<string, AnnotationReference[]>> = {};
 
   for (const contour of contours) {
     const labelId = contour?.data?.labelId;
@@ -360,12 +378,17 @@ export const syncLabelsFromAnnotations = (contours: any[]): void => {
     const labelDef = SEGMENTATION_LABELS.find(l => l.id === labelId);
     if (!labelDef) continue;
 
-    const modelType = (contour?.data?.modelType as ModelType) || 'manual';
+    const modelType = (contour?.data?.modelType as string) || 'manual';
     const referencedImageId = contour.metadata?.referencedImageId;
     const annotationRef: AnnotationReference = {
       annotationUID: contour.annotationUID,
       referencedImageId,
     };
+
+    // Initialize model if not exists
+    if (!labelsByModel[modelType]) {
+      labelsByModel[modelType] = new Map();
+    }
 
     if (!labelsByModel[modelType].has(labelId)) {
       labelsByModel[modelType].set(labelId, []);
@@ -379,15 +402,20 @@ export const syncLabelsFromAnnotations = (contours: any[]): void => {
     }
   }
 
-  // Build new labels array
-  const newLabelsByModel: Record<ModelType, SegmentationLabel[]> = {
-    manual: [],
-    threshold: [],
-    medsam: [],
-    unet_uterine: [],
+  // Build new labels array - preserve existing models and add new ones
+  const newLabelsByModel: Record<string, SegmentationLabel[]> = {
+    ...currentState.labelsByModel, // Preserve existing models
   };
 
-  (Object.keys(labelsByModel) as ModelType[]).forEach(modelType => {
+  Object.keys(labelsByModel).forEach(modelType => {
+    // Initialize model labels array if not exists
+    if (!newLabelsByModel[modelType]) {
+      newLabelsByModel[modelType] = [];
+    }
+
+    // Clear existing labels for this model (will be rebuilt from contours)
+    newLabelsByModel[modelType] = [];
+
     for (const [labelId, annotationRefs] of labelsByModel[modelType]) {
       const labelDef = SEGMENTATION_LABELS.find(l => l.id === labelId);
       if (!labelDef) continue;
@@ -400,7 +428,7 @@ export const syncLabelsFromAnnotations = (contours: any[]): void => {
         name: labelDef.name,
         color: firstContour?.data?.labelColor || labelDef.color,
         visible: existingLabel?.visible ?? true,
-        opacity: existingLabel?.opacity ?? 0.8,
+        opacity: existingLabel?.opacity ?? firstContour?.data?.fillOpacity ?? DEFAULT_LABEL_OPACITY,
         annotations: annotationRefs,
         method: modelType,
       });
@@ -437,10 +465,7 @@ export const resetSegmentationState = (): void => {
     activeModel: 'manual',
     labels: [],
     labelsByModel: {
-      manual: [],
-      threshold: [],
-      medsam: [],
-      unet_uterine: [],
+      manual: [], // Only manual is guaranteed
     },
   };
   notifySubscribers();

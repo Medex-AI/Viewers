@@ -87,14 +87,14 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
   useEffect(() => {
     if (!contextMenu.visible) return;
 
-    const handleClick = (evt: MouseEvent) => {
+    const handlePointerDown = (evt: PointerEvent) => {
       if (!contextMenuRef.current?.contains(evt.target as Node)) {
         setContextMenu(prev => ({ ...prev, visible: false }));
       }
     };
 
-    window.addEventListener('mousedown', handleClick);
-    return () => window.removeEventListener('mousedown', handleClick);
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [contextMenu.visible]);
 
   const handleContextMenu = (e: React.MouseEvent, labelId: string) => {
@@ -169,7 +169,7 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
       background: #374151;
       border-radius: 4px;
       height: 6px;
-      accent-color: #38bdf8;
+      accent-color: var(--slider-color, #38bdf8);
     }
     .segmentation-opacity-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
@@ -177,9 +177,9 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
       width: 16px;
       height: 16px;
       border-radius: 50%;
-      background: #f8fafc;
+      background: var(--slider-color, #38bdf8);
       cursor: pointer;
-      border: 2px solid #38bdf8;
+      border: 2px solid var(--slider-color, #38bdf8);
       box-shadow: 0 0 0 1px #0b1220, 0 0 0 3px rgba(15, 23, 42, 0.35);
       margin-top: -5px;
     }
@@ -187,9 +187,9 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
       width: 16px;
       height: 16px;
       border-radius: 50%;
-      background: #f8fafc;
+      background: var(--slider-color, #38bdf8);
       cursor: pointer;
-      border: 2px solid #38bdf8;
+      border: 2px solid var(--slider-color, #38bdf8);
       box-shadow: 0 0 0 1px #0b1220, 0 0 0 3px rgba(15, 23, 42, 0.35);
     }
     .segmentation-opacity-slider::-webkit-slider-runnable-track {
@@ -213,8 +213,8 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
       width: 16px;
       height: 16px;
       border-radius: 50%;
-      background: #f8fafc;
-      border: 2px solid #38bdf8;
+      background: var(--slider-color, #38bdf8);
+      border: 2px solid var(--slider-color, #38bdf8);
     }
   `;
 
@@ -330,10 +330,10 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
                   </div>
                 </label>
 
-                {/* Opacity slider */}
-                <div className="flex w-24 flex-col gap-1" title={`Opacity: ${Math.round(label.opacity * 100)}%`}>
+                {/* Fill opacity slider */}
+                <div className="flex w-24 flex-col gap-1" title={`Fill opacity: ${Math.round(label.opacity * 100)}%`}>
                   <span className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
-                    Opacity
+                    Fill
                   </span>
                   <div className="flex items-center gap-1">
                     <input
@@ -343,6 +343,7 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
                       value={Math.round(label.opacity * 100)}
                       onChange={e => handleOpacityChange(label.id, parseInt(e.target.value, 10) / 100)}
                       className="segmentation-opacity-slider w-full cursor-pointer"
+                      style={{ ['--slider-color' as string]: label.color }}
                     />
                     <span className="w-6 text-right text-[10px] text-gray-500">
                       {Math.round(label.opacity * 100)}

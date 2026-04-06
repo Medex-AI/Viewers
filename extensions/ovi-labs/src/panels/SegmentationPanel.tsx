@@ -21,6 +21,8 @@ import {
   getCachedSegmentationFrame,
   hydrateSegmentationCache,
 } from '../utils/segmentationManager';
+import segmentationApi from '../services/segmentationApi';
+import { getModelParams } from '../utils/segmentationParamsStore';
 
 interface SegmentationPanelProps {
   commandsManager?: any;
@@ -50,6 +52,8 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
   const [currentImageId, setCurrentImageId] = useState<string | undefined>(undefined);
   const [activeModel, setActiveModelState] = useState(getSegmentationState().activeModel);
   const [otsuClasses, setOtsuClasses] = useState(4);
+  const [isRecomputing, setIsRecomputing] = useState(false);
+  const [recomputeStatusText, setRecomputeStatusText] = useState<string | undefined>(undefined);
   const [{ activeViewportId }] = useViewportGrid();
   const hydratedSeriesRef = useRef<Set<string>>(new Set());
 
@@ -174,6 +178,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
       viewport,
       element,
       frameOfReferenceUID,
+      referencedImageId,
     }: {
       labels: Uint8Array;
       width: number;
@@ -183,6 +188,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
       viewport: any;
       element: HTMLElement;
       frameOfReferenceUID: string;
+      referencedImageId?: string;
     }) => {
       const annotationManager = annotation.state.getAnnotationManager();
       if (!annotationManager) return;
@@ -192,7 +198,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
       existingContours.forEach(existing => {
         if (
           (existing.data?.modelType || 'manual') === modelType &&
-          (!currentImageId || existing.metadata?.referencedImageId === currentImageId)
+          (!referencedImageId || existing.metadata?.referencedImageId === referencedImageId)
         ) {
           annotation.state.removeAnnotation(existing.annotationUID);
         }
@@ -216,7 +222,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
             metadata: {
               toolName: MANUAL_CONTOUR_TOOL_NAME,
               FrameOfReferenceUID: frameOfReferenceUID,
-              referencedImageId: currentImageId,
+              referencedImageId,
             },
             data: {
               contour: {
@@ -230,6 +236,9 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
               labelId: labelInfo.labelId,
               labelName: labelInfo.labelName,
               labelColor: labelInfo.labelColor,
+              fillColor: labelInfo.labelColor,
+              fillOpacity: 0.2,
+              renderFill: true,
               modelType,
               createdAt: now,
               modifiedAt: now,
@@ -250,152 +259,291 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
       );
       toolUtils.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
     },
-    [currentImageId]
+    []
   );
 
-  const runOtsuSegmentation = useCallback(() => {
+  const runOtsuSegmentation = useCallback(async () => {
     if (!activeViewportId || !servicesManager) return;
 
     const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
     const uiNotificationService = servicesManager?.services?.uiNotificationService;
     if (!cornerstoneViewportService) return;
 
+    // Get active model from segmentationStore
+    const { activeModel: selectedModel } = getSegmentationState();
+
+    // If manual, do nothing (manual annotations are drawn directly)
+    if (selectedModel === 'manual') {
+      return;
+    }
+
     const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
     const viewportInfo = cornerstoneViewportService.getViewportInfo(activeViewportId);
     const element = viewportInfo?.element as HTMLElement | undefined;
-    const sourceCanvas = element?.querySelector('canvas');
 
-    if (!viewport || !element || !sourceCanvas) {
+    if (!viewport || !element) {
       uiNotificationService?.show?.({
-        title: 'Threshold-Otsu',
-        message: 'Unable to access viewport canvas for segmentation.',
+        title: 'Segmentation',
+        message: 'Unable to access viewport for segmentation.',
         type: 'error',
         duration: 3000,
       });
       return;
     }
 
-    const maskAnnotations = annotation.state.getAnnotations(MASK_CONTOUR_TOOL_NAME, element) || [];
-    const targetMask = maskAnnotations.find(mask => {
-      if (currentImageId && mask?.metadata?.referencedImageId) {
-        return mask.metadata.referencedImageId === currentImageId;
+    const getCanvasGrayscale = () => {
+      const sourceCanvas = element.querySelector('canvas');
+      if (!sourceCanvas) {
+        return null;
       }
-      return true;
-    });
+      const ctx = sourceCanvas.getContext('2d');
+      if (!ctx) {
+        return null;
+      }
+      const width = sourceCanvas.width;
+      const height = sourceCanvas.height;
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const pixelArray: number[][] = [];
+      for (let y = 0; y < height; y++) {
+        const row: number[] = [];
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+          row.push(imageData.data[i]);
+        }
+        pixelArray.push(row);
+      }
+      return { width, height, pixelArray };
+    };
 
-    if (!targetMask?.data?.contour?.polyline?.length) {
+    const waitForViewportFrame = async (ms: number = 40) => {
+      await new Promise(resolve => setTimeout(resolve, ms));
+    };
+
+    const mapBackendLabelId = (label: { id: number; name: string }) => {
+      const byId: Record<number, string> = {
+        1: 'uterineCavity',
+        2: 'junctionalZone',
+        3: 'endometrium',
+        4: 'myometrium',
+      };
+
+      if (byId[label.id]) {
+        return byId[label.id];
+      }
+
+      const normalized = label.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (normalized.includes('uterinecavity')) return 'uterineCavity';
+      if (normalized.includes('junctionalzone')) return 'junctionalZone';
+      if (normalized.includes('endometrium')) return 'endometrium';
+      if (normalized.includes('myometrium')) return 'myometrium';
+      return 'uterineCavity';
+    };
+
+    const buildMaskArray = (maskAnnotation: any, width: number, height: number) => {
+      if (!maskAnnotation?.data?.contour?.polyline?.length) {
+        return undefined;
+      }
+
+      const viewportElementWidth = element.clientWidth || width;
+      const viewportElementHeight = element.clientHeight || height;
+      const scaleX = viewportElementWidth > 0 ? width / viewportElementWidth : 1;
+      const scaleY = viewportElementHeight > 0 ? height / viewportElementHeight : 1;
+      const needsNormalization = scaleX > 1.01 || scaleY > 1.01;
+
+      const normalizeCanvasPoint = (worldPoint: number[]) => {
+        const canvasPoint = viewport.worldToCanvas(worldPoint);
+        if (!needsNormalization) {
+          return canvasPoint;
+        }
+        return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
+      };
+
+      const polygon = maskAnnotation.data.contour.polyline.map((point: number[]) =>
+        normalizeCanvasPoint(point)
+      );
+
+      const binaryMask: number[][] = [];
+      for (let y = 0; y < height; y++) {
+        const row: number[] = [];
+        for (let x = 0; x < width; x++) {
+          row.push(isPointInPolygon([x + 0.5, y + 0.5], polygon) ? 1 : 0);
+        }
+        binaryMask.push(row);
+      }
+      return binaryMask;
+    };
+
+    // Extract mask contour (optional)
+    const maskAnnotations = annotation.state.getAnnotations(MASK_CONTOUR_TOOL_NAME, element) || [];
+    const targetMask =
+      maskAnnotations.find(mask => {
+        if (currentImageId && mask?.metadata?.referencedImageId) {
+          return mask.metadata.referencedImageId === currentImageId;
+        }
+        return false;
+      }) ||
+      maskAnnotations[0];
+
+    const modelParams = getModelParams(selectedModel);
+    const viewportImageIds = viewport.getImageIds?.() || [];
+    const currentIndex = viewport.getCurrentImageIdIndex?.() ?? 0;
+    const runAcrossTime = selectedModel === 'otsu' && viewportImageIds.length > 1;
+    const frameTargets = runAcrossTime
+      ? viewportImageIds.map((imageId: string, index: number) => ({ imageId, index }))
+      : [
+          {
+            imageId: currentImageId || viewportImageIds[currentIndex],
+            index: currentIndex,
+          },
+        ].filter((item): item is { imageId: string; index: number } => Boolean(item.imageId));
+
+    if (frameTargets.length === 0) {
       uiNotificationService?.show?.({
-        title: 'Threshold-Otsu',
-        message: 'Draw a mask contour first.',
-        type: 'warning',
+        title: 'Segmentation',
+        message: 'No image frames are available for segmentation.',
+        type: 'error',
         duration: 3000,
       });
       return;
     }
 
-    const ctx = sourceCanvas.getContext('2d');
-    if (!ctx) return;
+    const originalFrameIndex = viewport.getCurrentImageIdIndex?.() ?? 0;
 
-    const width = sourceCanvas.width;
-    const height = sourceCanvas.height;
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const pixelData = new Uint8Array(width * height);
+    try {
+      setIsRecomputing(true);
+      setRecomputeStatusText(
+        runAcrossTime
+          ? `Running ${selectedModel} segmentation across ${frameTargets.length} frames...`
+          : `Running ${selectedModel} segmentation...`
+      );
 
-    for (let i = 0; i < width * height; i += 1) {
-      pixelData[i] = imageData.data[i * 4];
-    }
+      uiNotificationService?.show?.({
+        title: 'Segmentation',
+        message: runAcrossTime
+          ? `Running ${selectedModel} across ${frameTargets.length} frames...`
+          : `Running ${selectedModel} segmentation...`,
+        type: 'info',
+        duration: 2000,
+      });
 
-    const elementWidth = element.clientWidth || width;
-    const elementHeight = element.clientHeight || height;
-    const scaleX = elementWidth > 0 ? width / elementWidth : 1;
-    const scaleY = elementHeight > 0 ? height / elementHeight : 1;
-    const needsNormalization = scaleX > 1.01 || scaleY > 1.01;
+      for (let frameIdx = 0; frameIdx < frameTargets.length; frameIdx++) {
+        const target = frameTargets[frameIdx];
+        setRecomputeStatusText(
+          runAcrossTime
+            ? `Awaiting result for frame ${frameIdx + 1}/${frameTargets.length}...`
+            : 'Awaiting segmentation result...'
+        );
 
-    const normalizeCanvasPoint = (worldPoint: number[]) => {
-      const canvasPoint = viewport.worldToCanvas(worldPoint);
-      if (!needsNormalization) {
-        return canvasPoint;
-      }
-      return [canvasPoint[0] / scaleX, canvasPoint[1] / scaleY];
-    };
+        if (runAcrossTime && viewport.setImageIdIndex) {
+          viewport.setImageIdIndex(target.index);
+          viewport.render?.();
+          await waitForViewportFrame();
+        }
 
-    const polygon = targetMask.data.contour.polyline.map(point => normalizeCanvasPoint(point));
-    const maskData = new Uint8Array(width * height);
+        const frameData = getCanvasGrayscale();
+        if (!frameData) {
+          throw new Error('Unable to capture viewport canvas for segmentation.');
+        }
 
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    polygon.forEach(([x, y]) => {
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    });
+        const maskArray = buildMaskArray(targetMask, frameData.width, frameData.height);
+        const prompt = maskArray
+          ? {
+              type: 'mask' as const,
+              data: { mask: maskArray },
+            }
+          : undefined;
 
-    const startX = Math.max(0, Math.floor(minX));
-    const startY = Math.max(0, Math.floor(minY));
-    const endX = Math.min(width - 1, Math.ceil(maxX));
-    const endY = Math.min(height - 1, Math.ceil(maxY));
+        const jobResponse = await segmentationApi.submitJob({
+          model_id: selectedModel,
+          image: frameData.pixelArray,
+          prompt,
+          params: modelParams,
+        });
 
-    for (let y = startY; y <= endY; y += 1) {
-      for (let x = startX; x <= endX; x += 1) {
-        if (isPointInPolygon([x + 0.5, y + 0.5], polygon)) {
-          maskData[y * width + x] = 1;
+        const result = await segmentationApi.pollJob(jobResponse.job_id, 120000);
+        if (result.status === 'failed') {
+          throw new Error(result.error || 'Segmentation failed');
+        }
+        if (!result.result) {
+          throw new Error('No segmentation result returned');
+        }
+
+        const labels = new Uint8Array(frameData.width * frameData.height);
+        result.result.mask.forEach((row, y) => {
+          row.forEach((value, x) => {
+            labels[y * frameData.width + x] = value;
+          });
+        });
+
+        const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> = {};
+        result.result.labels.forEach(label => {
+          labelMap[label.id] = {
+            labelId: mapBackendLabelId(label),
+            labelName: label.name,
+            labelColor: label.color,
+          };
+        });
+
+        const frameOfReferenceUID = viewport.getFrameOfReferenceUID?.();
+        if (!frameOfReferenceUID) {
+          throw new Error('Missing frame of reference for segmentation output.');
+        }
+
+        createContoursFromLabelMask({
+          labels,
+          width: frameData.width,
+          height: frameData.height,
+          labelMap,
+          modelType: selectedModel,
+          viewport,
+          element,
+          frameOfReferenceUID,
+          referencedImageId: target.imageId,
+        });
+
+        const instance = DicomMetadataStore.getInstanceByImageId(target.imageId);
+        const seriesInstanceUID = instance?.SeriesInstanceUID;
+        if (seriesInstanceUID) {
+          void cacheSegmentationFrame({
+            seriesInstanceUID,
+            model: selectedModel,
+            frameKey: target.imageId,
+            width: frameData.width,
+            height: frameData.height,
+            maskData: labels,
+            labelMap,
+          });
         }
       }
-    }
 
-    const { labels } = runMaskedOtsu(pixelData, maskData, otsuClasses);
-    const frameOfReferenceUID = viewport.getFrameOfReferenceUID?.();
-    const now = Date.now();
-    const instance = currentImageId ? DicomMetadataStore.getInstanceByImageId(currentImageId) : null;
-    const seriesInstanceUID = instance?.SeriesInstanceUID;
-
-    if (!frameOfReferenceUID) return;
-
-    const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> = {};
-    SEGMENTATION_LABELS.slice(0, otsuClasses).forEach((labelDef, index) => {
-      labelMap[index + 1] = {
-        labelId: labelDef.id,
-        labelName: labelDef.name,
-        labelColor: labelDef.color,
-      };
-    });
-
-    createContoursFromLabelMask({
-      labels,
-      width,
-      height,
-      labelMap,
-      modelType: 'threshold',
-      viewport,
-      element,
-      frameOfReferenceUID,
-    });
-
-    if (seriesInstanceUID) {
-      void cacheSegmentationFrame({
-        seriesInstanceUID,
-        model: 'threshold',
-        frameKey: currentImageId || `frame:${now}`,
-        width,
-        height,
-        maskData: labels,
-        labelMap,
+      uiNotificationService?.show?.({
+        title: 'Segmentation Complete',
+        message: runAcrossTime
+          ? `${selectedModel} segmentation completed for ${frameTargets.length} frames.`
+          : `${selectedModel} segmentation completed successfully.`,
+        type: 'success',
+        duration: 2500,
       });
+    } catch (error) {
+      console.error('Segmentation error:', error);
+      uiNotificationService?.show?.({
+        title: 'Segmentation Failed',
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        type: 'error',
+        duration: 5000,
+      });
+    } finally {
+      if (runAcrossTime && viewport.setImageIdIndex) {
+        viewport.setImageIdIndex(originalFrameIndex);
+        viewport.render?.();
+      }
+      setRecomputeStatusText(undefined);
+      setIsRecomputing(false);
     }
-
-    uiNotificationService?.show?.({
-      title: 'Threshold-Otsu',
-      message: 'Otsu segmentation computed for current frame.',
-      type: 'success',
-      duration: 2500,
-    });
-  }, [activeViewportId, servicesManager, currentImageId, otsuClasses, createContoursFromLabelMask]);
+  }, [activeViewportId, servicesManager, currentImageId, createContoursFromLabelMask]);
 
   useEffect(() => {
-    if (activeModel !== 'threshold' || !currentImageId || !servicesManager || !activeViewportId) {
+    if (activeModel !== 'otsu' || !currentImageId || !servicesManager || !activeViewportId) {
       return;
     }
 
@@ -403,7 +551,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
     const seriesInstanceUID = instance?.SeriesInstanceUID;
     if (!seriesInstanceUID) return;
 
-    const cached = getCachedSegmentationFrame(seriesInstanceUID, 'threshold', currentImageId);
+    const cached = getCachedSegmentationFrame(seriesInstanceUID, 'otsu', currentImageId);
     if (!cached) return;
 
     const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
@@ -417,23 +565,24 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
 
     const existingContours =
       annotationManager.getAnnotations(frameOfReferenceUID, MANUAL_CONTOUR_TOOL_NAME) || [];
-    const hasThreshold = existingContours.some(existing => {
-      const matchesModel = (existing.data?.modelType || 'manual') === 'threshold';
+    const hasOtsu = existingContours.some(existing => {
+      const matchesModel = (existing.data?.modelType || 'manual') === 'otsu';
       const matchesFrame =
         !currentImageId || existing.metadata?.referencedImageId === currentImageId;
       return matchesModel && matchesFrame;
     });
 
-    if (!hasThreshold) {
+    if (!hasOtsu) {
       createContoursFromLabelMask({
         labels: cached.maskData,
         width: cached.width,
         height: cached.height,
         labelMap: cached.labelMap,
-        modelType: 'threshold',
+        modelType: 'otsu',
         viewport,
         element,
         frameOfReferenceUID,
+        referencedImageId: currentImageId,
       });
     }
   }, [activeModel, currentImageId, servicesManager, activeViewportId, createContoursFromLabelMask]);
@@ -596,23 +745,10 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
             commandsManager={commandsManager}
             servicesManager={servicesManager}
             onRecompute={runOtsuSegmentation}
+            isRecomputing={isRecomputing}
+            recomputeStatusText={recomputeStatusText}
           />
-          {activeModel === 'threshold' && (
-            <div className="flex items-center justify-between gap-2 rounded border border-gray-800 bg-gray-900 px-3 py-2 text-[10px] text-gray-200">
-              <span className="text-gray-400">Classes</span>
-              <select
-                className="rounded border border-gray-700 bg-gray-950 px-2 py-1 text-[10px]"
-                value={otsuClasses}
-                onChange={evt => setOtsuClasses(Number(evt.target.value))}
-              >
-                {[2, 3, 4, 5].map(value => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Model configuration is now handled via gear icon modal */}
         </div>
 
         {/* Labels List Section */}
