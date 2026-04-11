@@ -1,0 +1,20 @@
+diff --git a/node_modules/@cornerstonejs/core/dist/esm/RenderingEngine/RenderingEngine.js b/node_modules/@cornerstonejs/core/dist/esm/RenderingEngine/RenderingEngine.js
+index 130df4a..602e716 100644
+--- a/node_modules/@cornerstonejs/core/dist/esm/RenderingEngine/RenderingEngine.js
++++ b/node_modules/@cornerstonejs/core/dist/esm/RenderingEngine/RenderingEngine.js
+@@ -59,7 +59,6 @@ class RenderingEngine {
+         };
+         this.id = id ? id : uuidv4();
+         this.useCPURendering = getShouldUseCPURendering();
+-        renderingEngineCache.set(this);
+         if (!isCornerstoneInitialized()) {
+             throw new Error('@cornerstonejs/core is not initialized, run init() first');
+         }
+@@ -71,6 +70,7 @@ class RenderingEngine {
+         }
+         this._viewports = new Map();
+         this.hasBeenDestroyed = false;
++        renderingEngineCache.set(this);
+     }
+     enableElement(viewportInputEntry) {
+         const viewportInput = this._normalizeViewportInputEntry(viewportInputEntry);

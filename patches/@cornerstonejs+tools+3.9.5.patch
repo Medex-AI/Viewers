@@ -1,0 +1,81 @@
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
+index 20295f6..ffed554 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
+@@ -24,6 +24,15 @@ const disable = function (element) {
+     element.removeEventListener(Enums.Events.STACK_NEW_IMAGE, _imageChangeEventListener);
+     element.removeEventListener(Enums.Events.IMAGE_RENDERED, _imageChangeEventListener);
+ };
++function normalizeActors(actors) {
++    if (Array.isArray(actors)) {
++        return actors;
++    }
++    if (!actors) {
++        return [];
++    }
++    return Object.values(actors);
++}
+ const perViewportManualTriggers = new Map();
+ function _imageChangeEventListener(evt) {
+     const eventData = evt.detail;
+@@ -36,7 +45,7 @@ function _imageChangeEventListener(evt) {
+     const labelmapRepresentations = representations.filter((representation) => representation.type === SegmentationRepresentations.Labelmap);
+     labelmapRepresentations.forEach((representation) => {
+         const { segmentationId } = representation;
+         updateLabelmapSegmentationImageReferences(viewportId, segmentationId);
+     });
+-    const actors = viewport.getActors();
++    const actors = normalizeActors(viewport.getActors());
+     const labelmapActors = labelmapRepresentations
+         .flatMap((representation) => {
+         return getLabelmapActorEntries(viewportId, representation.segmentationId);
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
+index abc1234..def5678 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
+@@ -107,6 +107,9 @@ function addListMethod(name, createInitialized) {
+         brushStrategy[name] ||= createInitialized
+             ? (enabledElement, operationData, ...args) => {
+                 const initializedData = brushStrategy[createInitialized](enabledElement, operationData, name);
++                if (!initializedData) {
++                    return;
++                }
+                 let returnValue;
+                 brushStrategy[listName].forEach((func) => {
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
+index 9219c3b..e8f560d 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
+@@ -1,5 +1,14 @@
+ import { getEnabledElementByViewportId } from '@cornerstonejs/core';
+ import { SegmentationRepresentations } from '../../../enums';
++function normalizeActors(actors) {
++    if (Array.isArray(actors)) {
++        return actors;
++    }
++    if (!actors) {
++        return [];
++    }
++    return Object.values(actors);
++}
+ function getActorEntry(viewportId, segmentationId, filterFn) {
+     const enabledElement = getEnabledElementByViewportId(viewportId);
+     if (!enabledElement) {
+@@ -9,7 +18,7 @@ function getActorEntry(viewportId, segmentationId, filterFn) {
+     if (!renderingEngine || !viewport) {
+         return;
+     }
+-    const actors = viewport.getActors();
++    const actors = normalizeActors(viewport.getActors());
+     const filteredActors = actors.filter(filterFn);
+     return filteredActors.length > 0 ? filteredActors[0] : undefined;
+ }
+@@ -20,7 +29,7 @@ function getActorEntries(viewportId, filterFn) {
+     if (!renderingEngine || !viewport) {
+         return;
+     }
+-    const actors = viewport.getActors();
++    const actors = normalizeActors(viewport.getActors());
+     const filteredActors = actors.filter(filterFn);
+     return filteredActors.length > 0 ? filteredActors : undefined;
+ }
