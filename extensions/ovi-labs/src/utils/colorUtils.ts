@@ -34,3 +34,14 @@ export const getContrastColor = (hexColor: string) => {
   const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return luminance > 0.68 ? '#0F172A' : '#F8FAFC';
 };
+
+export const rgbaToHex = (color?: number[] | null): string => {
+  if (!Array.isArray(color) || color.length < 3) {
+    return '#FFFFFF';
+  }
+
+  return `#${color
+    .slice(0, 3)
+    .map(value => Math.max(0, Math.min(255, Number(value) || 0)).toString(16).padStart(2, '0'))
+    .join('')}`.toUpperCase();
+};

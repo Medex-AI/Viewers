@@ -12,6 +12,7 @@ import { syncManualContourColor } from './syncManualContourColor';
 import { writeContourToOhifLabelmap } from './writeContourToOhifLabelmap';
 import { saveSegFrame, loadSegFrames, deleteSegFrame } from './segmentationStorage';
 import { setSegmentationPersistenceStatus } from '../../../extensions/cornerstone/src/utils/segmentationPersistenceStatus';
+import { hexToRgba255, rgbaToHex } from '../../../extensions/ovi-labs/src/utils/colorUtils';
 
 const DEFAULT_BRUSH_SIZE_MM = 3;
 const DEFAULT_BRUSH_TOOL_NAMES = [
@@ -171,25 +172,6 @@ const getSanitizedLabelmapFrames = (
   return sanitized;
 };
 
-const hexToRgba = (hex: string): [number, number, number, number] => {
-  const normalized = hex.replace('#', '');
-  const safeHex = normalized.length === 6 ? normalized : 'FFFFFF';
-  const r = parseInt(safeHex.slice(0, 2), 16);
-  const g = parseInt(safeHex.slice(2, 4), 16);
-  const b = parseInt(safeHex.slice(4, 6), 16);
-  return [r, g, b, 255];
-};
-
-const rgbaToHex = (color?: number[] | null): string => {
-  if (!Array.isArray(color) || color.length < 3) {
-    return '#FFFFFF';
-  }
-
-  return `#${color
-    .slice(0, 3)
-    .map(value => Math.max(0, Math.min(255, Number(value) || 0)).toString(16).padStart(2, '0'))
-    .join('')}`.toUpperCase();
-};
 
 const buildPersistedLabelMap = (segmentationId: string, servicesManager: any) => {
   const { segmentationService, viewportGridService } = servicesManager.services;
@@ -558,7 +540,7 @@ const restoreFrames = async (segmentationId: string, servicesManager: any): Prom
       segmentationService.addSegment(segmentationId, {
         segmentIndex: segIndex,
         label: entry.labelName,
-        color: hexToRgba(entry.labelColor || '#FFFFFF'),
+        color: hexToRgba255(entry.labelColor || '#FFFFFF'),
         isLocked: Boolean(entry.labelLocked),
         active: segIndex === sortedSegmentIndices[0],
       });
@@ -1221,7 +1203,7 @@ function modeFactory({ modeConfiguration }) {
                 viewportId,
                 generatedId,
                 idx,
-                hexToRgba(entry.labelColor || '#FFFFFF')
+                hexToRgba255(entry.labelColor || '#FFFFFF')
               );
             } catch {
               // best-effort

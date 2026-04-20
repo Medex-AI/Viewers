@@ -1,10 +1,4 @@
-import {
-  eventTarget,
-  getEnabledElement,
-  getEnabledElementByIds,
-  utilities as csUtils,
-  Enums as CoreEnums,
-} from '@cornerstonejs/core';
+import { eventTarget, getEnabledElement, Enums as CoreEnums } from '@cornerstonejs/core';
 import { annotation, Enums, utilities } from '@cornerstonejs/tools';
 import { DicomMetadataStore } from '@ohif/core';
 import ManualContourLabelMenu from '../components/ManualContourLabelMenu';
@@ -23,11 +17,34 @@ import {
   loadSegmentationFrames,
   saveSegmentationFrame,
 } from '../../../../extensions/ovi-labs/src/utils/segmentationPersistence';
+import { hexToRgba255, lightenHexColor } from '../../../../extensions/ovi-labs/src/utils/colorUtils';
 import {
-  getContrastColor,
-  hexToRgba255,
-  lightenHexColor,
-} from '../../../../extensions/ovi-labs/src/utils/colorUtils';
+  setBrushPointerType,
+  computeCanvasPxPerMm,
+  getCanvasPxPerMm,
+  shouldUseNativeBrushCursor,
+  hideBrushCursorOverlay,
+  restoreViewportCursor,
+  getViewportElementAtPoint,
+  showGestureHud,
+  syncBrushCursorOverlay,
+  syncBrushCursorOverlayAtClient,
+  updateBrushCursorColor,
+  updateCurrentCanvasScale,
+  resetBrushCursorState,
+} from './brushCursorDom';
+import {
+  getManualContourAnnotations,
+  copyContourPoints,
+  createManualContourAnnotation,
+  getSeriesIdentifiersFromViewport,
+  getSeriesIdentifiersFromAnnotation,
+  resolveReferencedImageId,
+  resolveFrameNumber,
+  getContourFrameKey,
+} from './contourAnnotationFactory';
+import { updateToolButtonColor } from './toolbarColorHelpers';
+import { removeManualContourHints, renderManualContourHints } from './viewportHints';
 
 const TOOL_NAME = 'ManualContour';
 const BRUSH_TOOL_NAME = 'CircularBrush';
@@ -56,13 +73,8 @@ const { segmentation: segmentationUtils } = utilities as typeof utilities & {
 
 let activeLabelId = LABELS[0].id;
 let isManualContourActive = false;
-let activeViewportHintTargets: HTMLElement[] = [];
 let currentBrushSize = DEFAULT_BRUSH_SIZE;
-let brushCursorOverlay: HTMLDivElement | null = null;
-let gestureHudOverlay: HTMLDivElement | null = null;
-let currentCanvasPxPerMm: number | null = null;
 let lastNonEraserLabelId = LABELS[0].id;
-let currentBrushPointerType: string | null = null;
 let saveTimeoutBySegmentationId = new Map<string, number>();
 let restoredSegmentationKeys = new Set<string>();
 
@@ -91,29 +103,6 @@ const pushOviBrushDebug = (message: string, details?: Record<string, unknown>) =
   console.debug('[OVI Brush Debug]', payload);
 };
 
-const computeCanvasPxPerMm = (element: HTMLElement): number | null => {
-  try {
-    const enabledEl = getEnabledElement(element);
-    const camera = (enabledEl?.viewport as any)?.getCamera?.();
-    if (!camera?.parallelScale || !element.clientHeight) {
-      return null;
-    }
-    return element.clientHeight / (camera.parallelScale * 2);
-  } catch {
-    return null;
-  }
-};
-const isTouchCapableDevice = () =>
-  typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
-
-const shouldUseNativeBrushCursor = () => {
-  // Temporary demo workaround:
-  // on tablet + stylus we force the non-native OVI brush cursor path because
-  // the native Cornerstone brush cursor does not currently behave correctly.
-  // The proper fix should map stylus behavior to the same hover/cursor lifecycle
-  // as desktop pointer hover instead of branching cursor implementations here.
-  return !(isTouchCapableDevice() && currentBrushPointerType === 'pen');
-};
 
 const getLabelConfig = labelId => LABEL_OPTIONS.find(label => label.id === labelId) || LABELS[0];
 
@@ -178,241 +167,7 @@ const setBrushSize = (value: number) => {
   });
 };
 
-const ensureBrushCursorOverlay = () => {
-  if (shouldUseNativeBrushCursor()) {
-    return null;
-  }
 
-  if (typeof document === 'undefined') {
-    return null;
-  }
-
-  if (!brushCursorOverlay) {
-    brushCursorOverlay = document.createElement('div');
-    brushCursorOverlay.className = 'ovi-brush-cursor-overlay';
-    brushCursorOverlay.style.position = 'fixed';
-    brushCursorOverlay.style.pointerEvents = 'none';
-    brushCursorOverlay.style.borderRadius = '9999px';
-    brushCursorOverlay.style.borderStyle = 'solid';
-    brushCursorOverlay.style.borderWidth = '2px';
-    brushCursorOverlay.style.boxSizing = 'border-box';
-    brushCursorOverlay.style.transform = 'translate(-50%, -50%)';
-    brushCursorOverlay.style.outline = 'none';
-    brushCursorOverlay.style.boxShadow = 'none';
-    brushCursorOverlay.style.background = 'transparent';
-    brushCursorOverlay.style.zIndex = '2147483647';
-    brushCursorOverlay.style.display = 'none';
-    document.body.appendChild(brushCursorOverlay);
-  }
-
-  return brushCursorOverlay;
-};
-
-const hideBrushCursorOverlay = () => {
-  if (shouldUseNativeBrushCursor()) {
-    return;
-  }
-
-  if (brushCursorOverlay) {
-    brushCursorOverlay.style.display = 'none';
-  }
-};
-
-const ensureGestureHudOverlay = () => {
-  if (typeof document === 'undefined') {
-    return null;
-  }
-
-  if (!gestureHudOverlay) {
-    gestureHudOverlay = document.createElement('div');
-    gestureHudOverlay.className = 'ovi-pencil-gesture-hud';
-    gestureHudOverlay.style.position = 'fixed';
-    gestureHudOverlay.style.top = '20px';
-    gestureHudOverlay.style.left = '50%';
-    gestureHudOverlay.style.transform = 'translateX(-50%)';
-    gestureHudOverlay.style.padding = '8px 12px';
-    gestureHudOverlay.style.borderRadius = '9999px';
-    gestureHudOverlay.style.background = 'rgba(15, 23, 42, 0.9)';
-    gestureHudOverlay.style.color = '#F8FAFC';
-    gestureHudOverlay.style.fontSize = '12px';
-    gestureHudOverlay.style.fontWeight = '600';
-    gestureHudOverlay.style.pointerEvents = 'none';
-    gestureHudOverlay.style.zIndex = '2147483647';
-    gestureHudOverlay.style.display = 'none';
-    document.body.appendChild(gestureHudOverlay);
-  }
-
-  return gestureHudOverlay;
-};
-
-const showGestureHud = (message: string) => {
-  const hud = ensureGestureHudOverlay();
-  if (!hud) {
-    return;
-  }
-
-  hud.textContent = message;
-  hud.style.display = 'block';
-  window.setTimeout(() => {
-    if (hud.textContent === message) {
-      hud.style.display = 'none';
-    }
-  }, 1200);
-};
-
-const restoreViewportCursor = () => {
-  if (typeof document === 'undefined') {
-    return;
-  }
-
-  document.querySelectorAll('[data-viewport-uid]').forEach(viewport => {
-    if (viewport instanceof HTMLElement) {
-      viewport.style.removeProperty('cursor');
-    }
-  });
-};
-
-const getViewportElementAtPoint = (clientX: number, clientY: number): HTMLElement | null => {
-  if (typeof document === 'undefined') {
-    return null;
-  }
-
-  const el = document.elementFromPoint(clientX, clientY);
-  if (!el) {
-    return null;
-  }
-
-  const viewport = el.closest('[data-viewport-uid]');
-  return viewport instanceof HTMLElement ? viewport : null;
-};
-
-const syncBrushCursorOverlay = (
-  element?: HTMLElement,
-  canvasPoint?: { x?: number; y?: number } | number[]
-) => {
-  if (shouldUseNativeBrushCursor()) {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  const overlay = ensureBrushCursorOverlay();
-  if (!overlay || !element || !canvasPoint) {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  const x = Array.isArray(canvasPoint) ? canvasPoint[0] : canvasPoint.x;
-  const y = Array.isArray(canvasPoint) ? canvasPoint[1] : canvasPoint.y;
-  if (typeof x !== 'number' || typeof y !== 'number') {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  if (x < 0 || y < 0 || x > element.clientWidth || y > element.clientHeight) {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  const pxPerMm = computeCanvasPxPerMm(element) ?? currentCanvasPxPerMm ?? 1;
-  currentCanvasPxPerMm = pxPerMm;
-
-  const rect = element.getBoundingClientRect();
-  const { color } = getLabelConfig(activeLabelId);
-  const diameter = Math.max(8, getBrushSize() * 2 * pxPerMm);
-
-  overlay.style.display = 'block';
-  overlay.style.left = `${rect.left + x}px`;
-  overlay.style.top = `${rect.top + y}px`;
-  overlay.style.width = `${diameter}px`;
-  overlay.style.height = `${diameter}px`;
-  overlay.style.borderColor = color;
-  overlay.style.backgroundColor = 'transparent';
-};
-
-const syncBrushCursorOverlayAtClient = (clientX: number, clientY: number) => {
-  if (shouldUseNativeBrushCursor()) {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  const overlay = ensureBrushCursorOverlay();
-  if (!overlay) {
-    return;
-  }
-
-  const viewportEl = getViewportElementAtPoint(clientX, clientY);
-  if (!viewportEl) {
-    hideBrushCursorOverlay();
-    return;
-  }
-
-  const pxPerMm = computeCanvasPxPerMm(viewportEl) ?? currentCanvasPxPerMm ?? 1;
-  currentCanvasPxPerMm = pxPerMm;
-
-  const { color } = getLabelConfig(activeLabelId);
-  const diameter = Math.max(8, getBrushSize() * 2 * pxPerMm);
-
-  overlay.style.display = 'block';
-  overlay.style.left = `${clientX}px`;
-  overlay.style.top = `${clientY}px`;
-  overlay.style.width = `${diameter}px`;
-  overlay.style.height = `${diameter}px`;
-  overlay.style.borderColor = color;
-  overlay.style.backgroundColor = 'transparent';
-};
-
-const getToolbarButtonElements = (toolNames: string[]) => {
-  if (typeof window === 'undefined') {
-    return [];
-  }
-
-  return toolNames
-    .flatMap(toolName => {
-      const toolRoot = window.document.querySelector(`[data-tool="${toolName}"]`);
-      if (!(toolRoot instanceof HTMLElement)) {
-        return [];
-      }
-
-      const innerButton = toolRoot.querySelector('button');
-      return [innerButton instanceof HTMLElement ? innerButton : toolRoot];
-    })
-    .filter((element): element is HTMLElement => element instanceof HTMLElement);
-};
-
-const updateToolButtonColor = (
-  toolNames: string[],
-  color: string,
-  isActive: boolean
-) => {
-  const foregroundColor = getContrastColor(color);
-  const buttonElements = getToolbarButtonElements(toolNames);
-
-  buttonElements.forEach(buttonElement => {
-    if (isActive) {
-      buttonElement.style.setProperty('border', `2px solid ${color}`, 'important');
-      buttonElement.style.setProperty('box-shadow', 'none', 'important');
-      buttonElement.style.setProperty('background-color', color, 'important');
-      buttonElement.style.setProperty('color', foregroundColor, 'important');
-    } else {
-      buttonElement.style.removeProperty('border');
-      buttonElement.style.removeProperty('box-shadow');
-      buttonElement.style.removeProperty('background-color');
-      buttonElement.style.removeProperty('color');
-    }
-
-    buttonElement.querySelectorAll('svg').forEach(icon => {
-      if (!(icon instanceof SVGElement || icon instanceof HTMLElement)) {
-        return;
-      }
-
-      if (isActive) {
-        icon.style.setProperty('color', foregroundColor, 'important');
-      } else {
-        icon.style.removeProperty('color');
-      }
-    });
-  });
-};
 
 const syncToolbarButtonColors = servicesManager => {
   const { color } = getLabelConfig(activeLabelId);
@@ -637,10 +392,8 @@ const updateActiveLabel = async (
   applyToolGroupStyle(activeLabelId);
 
   // Immediately recolor the cursor overlay without waiting for the next mouse move
-  if (!shouldUseNativeBrushCursor() && brushCursorOverlay && brushCursorOverlay.style.display !== 'none') {
-    const { color } = getLabelConfig(labelId);
-    brushCursorOverlay.style.borderColor = color;
-    brushCursorOverlay.style.backgroundColor = isEraserLabelId(labelId) ? 'transparent' : `${color}26`;
+  if (!shouldUseNativeBrushCursor()) {
+    updateBrushCursorColor(getLabelConfig(labelId).color, isEraserLabelId(labelId));
   }
 
   const brushToolState = await ensureBrushToolReady(
@@ -732,7 +485,7 @@ const getViewportIdForElement = (element?: HTMLElement | null) => {
   }
 
   try {
-    const enabledElement = getEnabledElement(element);
+    const enabledElement = getEnabledElement(element as any);
     return enabledElement?.viewport?.id;
   } catch {
     return undefined;
@@ -823,191 +576,6 @@ const installBrushFirstUseGuard = (servicesManager: AppTypes.ServicesManager) =>
   });
 };
 
-const getManualContourAnnotations = (frameOfReferenceUID?: string) => {
-  const annotationManager = annotation.state.getAnnotationManager();
-  if (!annotationManager) {
-    return [];
-  }
-
-  if (frameOfReferenceUID) {
-    return annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
-  }
-
-  const frames = annotationManager.getFramesOfReference() || [];
-  return frames.flatMap(frame => annotationManager.getAnnotations(frame, TOOL_NAME) || []);
-};
-
-const copyContourPoints = (points: number[][] = []) => points.map(point => [...point]);
-
-const createManualContourAnnotation = ({
-  sourceAnnotation,
-  referencedImageId,
-  frameNumber,
-  seriesInstanceUID,
-  studyInstanceUID,
-}) => {
-  const contourPoints = copyContourPoints(sourceAnnotation?.data?.contour?.polyline || []);
-  const now = Date.now();
-  const metadata = {
-    ...(sourceAnnotation?.metadata || {}),
-    toolName: TOOL_NAME,
-  } as Record<string, any>;
-  if (referencedImageId) {
-    metadata.referencedImageId = referencedImageId;
-  }
-
-  return {
-    annotationUID: csUtils.uuidv4(),
-    highlighted: false,
-    isLocked: false,
-    isVisible: true,
-    invalidated: true,
-    metadata,
-    data: {
-      ...(sourceAnnotation?.data || {}),
-      fillColor: sourceAnnotation?.data?.fillColor || sourceAnnotation?.data?.labelColor,
-      fillOpacity: sourceAnnotation?.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
-      renderFill: sourceAnnotation?.data?.renderFill ?? true,
-      contour: {
-        ...(sourceAnnotation?.data?.contour || {}),
-        polyline: contourPoints,
-      },
-      handles: {
-        ...(sourceAnnotation?.data?.handles || {}),
-        points: contourPoints,
-        activeHandleIndex: null,
-      },
-      createdAt: now,
-      modifiedAt: now,
-      frameNumber,
-      seriesInstanceUID,
-      studyInstanceUID,
-    },
-  };
-};
-
-const getSeriesIdentifiersFromViewport = (servicesManager, viewport, viewportInfo) => {
-  const displaySetService = servicesManager?.services?.displaySetService;
-  const displaySetOptions = viewportInfo?.getDisplaySetOptions?.();
-  const displaySetInstanceUID = displaySetOptions?.[0]?.displaySetInstanceUID;
-  if (displaySetInstanceUID && displaySetService?.getDisplaySetByUID) {
-    const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
-    return {
-      seriesInstanceUID: displaySet?.SeriesInstanceUID,
-      studyInstanceUID: displaySet?.StudyInstanceUID,
-    };
-  }
-
-  const imageId = viewport?.getCurrentImageId?.();
-  if (imageId) {
-    const instance = DicomMetadataStore.getInstanceByImageId(imageId);
-    return {
-      seriesInstanceUID: instance?.SeriesInstanceUID,
-      studyInstanceUID: instance?.StudyInstanceUID,
-    };
-  }
-
-  return {};
-};
-
-const getSeriesIdentifiersFromAnnotation = contour => {
-  const seriesInstanceUID = contour?.data?.seriesInstanceUID;
-  const studyInstanceUID = contour?.data?.studyInstanceUID;
-  if (seriesInstanceUID || studyInstanceUID) {
-    return { seriesInstanceUID, studyInstanceUID };
-  }
-
-  const imageId = contour?.metadata?.referencedImageId;
-  if (imageId) {
-    const instance = DicomMetadataStore.getInstanceByImageId(imageId);
-    return {
-      seriesInstanceUID: instance?.SeriesInstanceUID,
-      studyInstanceUID: instance?.StudyInstanceUID,
-    };
-  }
-
-  return {};
-};
-
-const resolveReferencedImageId = evt => {
-  const element = evt?.detail?.element;
-  if (element) {
-    const enabledElement = getEnabledElement(element);
-    const viewport = enabledElement?.viewport;
-    const imageId = viewport?.getCurrentImageId?.();
-    return { imageId, viewport };
-  }
-
-  const { viewportId, renderingEngineId } = evt?.detail || {};
-  if (viewportId && renderingEngineId) {
-    const enabledElement = getEnabledElementByIds(viewportId, renderingEngineId);
-    const viewport = enabledElement?.viewport;
-    const imageId = viewport?.getCurrentImageId?.();
-    return { imageId, viewport };
-  }
-
-  return {};
-};
-
-const resolveFrameNumber = viewport => {
-  const currentIndex = viewport?.getCurrentImageIdIndex?.();
-  if (currentIndex !== undefined && currentIndex !== null) {
-    return currentIndex + 1;
-  }
-
-  const frameNumber =
-    viewport?.getFrameNumber?.() ?? viewport?.getCurrentFrameNumber?.() ?? undefined;
-  if (typeof frameNumber === 'number' && !Number.isNaN(frameNumber)) {
-    return frameNumber;
-  }
-
-  return undefined;
-};
-
-const getContourFrameKey = contour => {
-  const imageId = contour?.metadata?.referencedImageId;
-  if (imageId) {
-    return { type: 'imageId', value: imageId };
-  }
-
-  const frameNumber = contour?.data?.frameNumber || contour?.metadata?.frameNumber;
-  if (frameNumber !== undefined) {
-    return { type: 'frameNumber', value: frameNumber };
-  }
-
-  return { type: 'unknown', value: undefined };
-};
-
-const removeManualContourHints = () => {
-  activeViewportHintTargets.forEach(target => {
-    const hint = target.querySelector('.ovi-manual-contour-hint');
-    if (hint) {
-      hint.remove();
-    }
-  });
-  activeViewportHintTargets = [];
-};
-
-const renderManualContourHints = () => {
-  removeManualContourHints();
-  if (typeof document === 'undefined' || isTouchCapableDevice()) {
-    return;
-  }
-
-  const viewports = Array.from(document.querySelectorAll('[data-viewport-uid]'));
-  activeViewportHintTargets = viewports.filter(node => node instanceof HTMLElement) as HTMLElement[];
-
-  activeViewportHintTargets.forEach(target => {
-    const hint = document.createElement('div');
-    hint.className = 'ovi-manual-contour-hint';
-    const lineOne = document.createElement('div');
-    lineOne.textContent = 'Right-click: add/remove point';
-    const lineTwo = document.createElement('div');
-    lineTwo.textContent = 'Cmd/Ctrl+V: paste previous contour';
-    hint.append(lineOne, lineTwo);
-    target.appendChild(hint);
-  });
-};
 
 const isManualContourToolActive = servicesManager => {
   const toolGroupService = servicesManager?.services?.toolGroupService;
@@ -1059,13 +627,10 @@ export const showManualContourLabelMenu = ({
       : undefined);
 
   // Seed the canvas scale from the active viewport so the preview is correct on first open
-  if (currentCanvasPxPerMm === null && servicesManager) {
+  if (getCanvasPxPerMm() === null && servicesManager) {
     const activeCtx = getActiveViewportContext(servicesManager);
     if (activeCtx?.element instanceof HTMLElement) {
-      const seeded = computeCanvasPxPerMm(activeCtx.element);
-      if (seeded !== null) {
-        currentCanvasPxPerMm = seeded;
-      }
+      updateCurrentCanvasScale(activeCtx.element);
     }
   }
 
@@ -1087,7 +652,7 @@ export const showManualContourLabelMenu = ({
           ? targetAnnotation.data.labelId
           : activeLabelId,
       brushSize: getBrushSize(),
-      canvasPxPerMm: currentCanvasPxPerMm,
+      canvasPxPerMm: getCanvasPxPerMm(),
       showBrushSizeControl: BRUSH_TOOL_NAMES.includes(sourceToolName),
       onBrushSizeChange: value => setBrushSize(value),
       onSelect: value => {
@@ -1402,7 +967,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     if (evt.pointerType !== 'mouse' && evt.pointerType !== 'pen') {
       return;
     }
-    currentBrushPointerType = evt.pointerType;
+    setBrushPointerType(evt.pointerType);
 
     const viewportElement = getViewportElementAtPoint(evt.clientX, evt.clientY);
     if (!viewportElement) {
@@ -1508,7 +1073,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       element.style.setProperty('cursor', 'none', 'important');
     }
 
-    syncBrushCursorOverlay(element, currentPoints?.canvas);
+    syncBrushCursorOverlay(element, currentPoints?.canvas, getLabelConfig(activeLabelId).color, getBrushSize());
   };
 
   const onPointerMove = (evt: PointerEvent) => {
@@ -1516,7 +1081,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     if (pointerType !== 'pen' && pointerType !== 'mouse') {
       return;
     }
-    currentBrushPointerType = pointerType;
+    setBrushPointerType(pointerType);
 
     const toolGroupService = servicesManager?.services?.toolGroupService;
     const activeTool = toolGroupService?.getActivePrimaryMouseButtonTool?.(TOOL_GROUP_ID);
@@ -1533,7 +1098,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       }
     }
 
-    syncBrushCursorOverlayAtClient(evt.clientX, evt.clientY);
+    syncBrushCursorOverlayAtClient(evt.clientX, evt.clientY, getLabelConfig(activeLabelId).color, getBrushSize());
   };
 
   const onPointerLeave = (evt: PointerEvent) => {
@@ -1541,7 +1106,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       return;
     }
 
-    currentBrushPointerType = null;
+    setBrushPointerType(null);
 
     hideBrushCursorOverlay();
   };
@@ -1551,7 +1116,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       return;
     }
 
-    currentBrushPointerType = null;
+    setBrushPointerType(null);
 
     hideBrushCursorOverlay();
   };
@@ -1562,9 +1127,8 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       return;
     }
 
-    const newScale = computeCanvasPxPerMm(element);
-    if (newScale !== null && newScale !== currentCanvasPxPerMm) {
-      currentCanvasPxPerMm = newScale;
+    const newScale = updateCurrentCanvasScale(element);
+    if (newScale !== null) {
       window?.dispatchEvent?.(
         new CustomEvent(OVI_CANVAS_SCALE_EVENT, { detail: { canvasPxPerMm: newScale } })
       );
@@ -1835,13 +1399,8 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     saveTimeoutBySegmentationId.forEach(timeoutId => window.clearTimeout(timeoutId));
     saveTimeoutBySegmentationId.clear();
     restoredSegmentationKeys.clear();
-    currentCanvasPxPerMm = null;
     removeManualContourHints();
-    hideBrushCursorOverlay();
+    resetBrushCursorState();
     restoreViewportCursor();
-    brushCursorOverlay?.remove();
-    brushCursorOverlay = null;
-    gestureHudOverlay?.remove();
-    gestureHudOverlay = null;
   };
 }
