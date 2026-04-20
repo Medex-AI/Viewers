@@ -27,9 +27,11 @@ export type ButtonOptions = {
   step?: number;
   value?: number | number[] | string;
   commands?: (value: unknown) => void;
+  onChange?: (value: unknown) => void;
   condition?: (props: Record<string, unknown>) => boolean;
   children?: React.ReactNode | (() => React.ReactNode);
   options?: Array<{ value: string; label: string }>;
+  showInlineAdjustmentButtons?: boolean;
 };
 
 export type ButtonProps = {

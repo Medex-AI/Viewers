@@ -6,17 +6,37 @@ export default {
       {
         id: 'forExistingMeasurement',
         selector: ({ nearbyToolData }) =>
-          !!nearbyToolData &&
-          nearbyToolData?.metadata?.toolName !== 'RotatableRectangleROI' &&
-          nearbyToolData?.metadata?.toolName !== 'ManualContour',
+          !!nearbyToolData && nearbyToolData?.metadata?.toolName !== 'ManualContour',
         items: [
           {
-            label: 'Delete measurement',
+            label: 'Delete annotation',
             commands: 'removeMeasurement',
           },
           {
             label: 'Add Label',
             commands: 'setMeasurementLabel',
+          },
+        ],
+      },
+    ],
+  },
+  contourContextMenu: {
+    inheritsFrom: 'ohif.contextMenu',
+    menus: [
+      {
+        id: 'forContourAnnotation',
+        selector: ({ nearbyToolData }) =>
+          !!nearbyToolData &&
+          ['ManualContour', 'MaskContour'].includes(nearbyToolData?.metadata?.toolName),
+        items: [
+          {
+            label: 'Delete contour',
+            commands: 'removeMeasurement',
+          },
+          {
+            label: 'Change class',
+            selector: ({ nearbyToolData }) => nearbyToolData?.metadata?.toolName === 'ManualContour',
+            commands: 'showManualContourLabelMenu',
           },
         ],
       },

@@ -29,7 +29,8 @@ const TABLET_SCROLL_MAX_HORIZONTAL_DRIFT_PX = 14;
 const TABLET_SCROLL_MAX_VERTICAL_DELTA_MISMATCH_PX = 16;
 const TABLET_ZOOM_LOCK_THRESHOLD_PX = 4;
 const TABLET_PAN_LOCK_THRESHOLD_PX = 5;
-
+const CONTOUR_LONG_PRESS_MS = 700;
+const CONTOUR_LONG_PRESS_MOVE_CANCEL_PX = 10;
 const isTouchCapableDevice = () =>
   typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
@@ -146,6 +147,13 @@ const OHIFCornerstoneViewport = React.memo(
     }>({
       mode: null,
       scrollAccumulator: 0,
+    });
+    const contourLongPressRef = useRef<{
+      timeoutId?: number;
+      startPoint?: { x: number; y: number };
+      fired: boolean;
+    }>({
+      fired: false,
     });
     // Tracks whether an Apple Pencil (or other stylus) is currently in contact,
     // used to suppress palm touch events while drawing.
@@ -366,7 +374,7 @@ const OHIFCornerstoneViewport = React.memo(
 
     useEffect(() => {
       const element = elementRef.current;
-      if (!element || !isTouchCapableDevice()) {
+      if (!element) {
         return;
       }
 
@@ -408,6 +416,78 @@ const OHIFCornerstoneViewport = React.memo(
         };
       };
 
+      const clearContourLongPress = () => {
+        const timeoutId = contourLongPressRef.current.timeoutId;
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+        }
+
+        contourLongPressRef.current = {
+          fired: false,
+        };
+      };
+
+      const triggerContourLongPress = (touch: Touch) => {
+        const target = element;
+        const rightClickEvent = new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          button: 2,
+          buttons: 2,
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          screenX: touch.screenX,
+          screenY: touch.screenY,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+          metaKey: false,
+        });
+
+        setInputDebugInfo(
+          `longpress:direct touches=1 activeTool=${getActiveToolName() || 'none'}`
+        );
+        target.dispatchEvent(rightClickEvent);
+      };
+
+      const triggerAnnotationLongPressMenu = (touch: Touch) => {
+        const rect = element.getBoundingClientRect();
+        const canvasCoordinates = [touch.clientX - rect.left, touch.clientY - rect.top];
+        setInputDebugInfo(
+          `longpress:invoke activeTool=${getActiveToolName() || 'none'} point=${Math.round(
+            canvasCoordinates[0]
+          )},${Math.round(canvasCoordinates[1])}`
+        );
+
+        const syntheticEvent = {
+          detail: {
+            element,
+            event: {
+              pageX: touch.pageX,
+              pageY: touch.pageY,
+              clientX: touch.clientX,
+              clientY: touch.clientY,
+              which: 3,
+              button: 2,
+              touches: {},
+            },
+            currentPoints: {
+              canvas: canvasCoordinates,
+              client: [touch.clientX, touch.clientY],
+            },
+          },
+        };
+
+        commandsManager.runCommand(
+          'showOviLabsContextMenu',
+          {
+            nearbyToolData: null,
+            event: syntheticEvent,
+          },
+          'OVI_LABS'
+        );
+      };
+
       const handlePencilDown = (event: PointerEvent) => {
         setInputDebugInfo(
           `pointerdown:${event.pointerType || 'unknown'} touches=0 activeTool=${getActiveToolName() || 'none'}`
@@ -440,6 +520,20 @@ const OHIFCornerstoneViewport = React.memo(
         const isStylusTouch = touchListContainsStylus(event.touches);
         const isDirectTouch = touchListContainsDirect(event.touches);
         setInputDebugInfo(formatTouchDebug(event));
+
+        if (isDirectTouch && event.touches.length === 1) {
+          const firstTouch = event.touches[0];
+          clearContourLongPress();
+          if (firstTouch) {
+            contourLongPressRef.current.startPoint = normalizeTouchPoint(firstTouch);
+            contourLongPressRef.current.timeoutId = window.setTimeout(() => {
+              contourLongPressRef.current.fired = true;
+              triggerAnnotationLongPressMenu(firstTouch);
+            }, CONTOUR_LONG_PRESS_MS);
+          }
+        } else {
+          clearContourLongPress();
+        }
 
         if (isContourMode() && isDirectTouch) {
           if (event.touches.length >= 2) {
@@ -494,9 +588,23 @@ const OHIFCornerstoneViewport = React.memo(
         const isDirectTouch = touchListContainsDirect(event.touches);
         setInputDebugInfo(formatTouchDebug(event));
 
+        if (isDirectTouch && event.touches.length === 1) {
+          const currentPoint = normalizeTouchPoint(event.touches[0]);
+          const startPoint = contourLongPressRef.current.startPoint;
+          if (startPoint) {
+            const distance = Math.hypot(currentPoint.x - startPoint.x, currentPoint.y - startPoint.y);
+            if (distance > CONTOUR_LONG_PRESS_MOVE_CANCEL_PX) {
+              clearContourLongPress();
+            }
+          }
+        } else if (event.touches.length !== 1) {
+          clearContourLongPress();
+        }
+
         if (isContourMode() && isDirectTouch) {
           const viewport = getViewport();
           if (!viewport) {
+            clearContourLongPress();
             event.preventDefault();
             event.stopImmediatePropagation();
             return;
@@ -505,7 +613,14 @@ const OHIFCornerstoneViewport = React.memo(
           const touches = getTouchArray(event.touches);
           const state = tabletGestureStateRef.current;
 
+          if (touches.length === 1) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+          }
+
           if (touches.length >= 2 && state.lastTouches?.length >= 2) {
+            clearContourLongPress();
             event.preventDefault();
             event.stopImmediatePropagation();
 
@@ -610,6 +725,7 @@ const OHIFCornerstoneViewport = React.memo(
 
           event.preventDefault();
           event.stopImmediatePropagation();
+          clearContourLongPress();
           resetGestureState();
           return;
         }
@@ -730,11 +846,82 @@ const OHIFCornerstoneViewport = React.memo(
       const handleTouchEnd = (event: TouchEvent) => {
         setInputDebugInfo(formatTouchDebug(event));
         if (isContourMode() && touchListContainsDirect(event.changedTouches)) {
+          clearContourLongPress();
           event.preventDefault();
           event.stopImmediatePropagation();
         }
         resetGestureState();
       };
+
+      const handleContextMenu = (event: MouseEvent) => {
+        const rect = element.getBoundingClientRect();
+        const canvasCoordinates = [event.clientX - rect.left, event.clientY - rect.top];
+        const nearbyToolData = commandsManager.runCommand(
+          'getNearbyToolData',
+          {
+            element,
+            canvasCoordinates,
+          },
+          'CORNERSTONE'
+        );
+
+        setInputDebugInfo(
+          `contextmenu:button=${event.button} activeTool=${getActiveToolName() || 'none'} picked=${nearbyToolData?.metadata?.toolName || 'none'}`
+        );
+
+        if (isContourMode()) {
+          const syntheticEvent = {
+            detail: {
+              element,
+              event: {
+                pageX: event.pageX,
+                pageY: event.pageY,
+                clientX: event.clientX,
+                clientY: event.clientY,
+                which: 3,
+                button: 2,
+                altKey: event.altKey,
+                ctrlKey: event.ctrlKey,
+                shiftKey: event.shiftKey,
+                metaKey: event.metaKey,
+              },
+              currentPoints: {
+                canvas: canvasCoordinates,
+                client: [event.clientX, event.clientY],
+              },
+            },
+          };
+
+          commandsManager.runCommand(
+            'showOviLabsContextMenu',
+            {
+              nearbyToolData,
+              event: syntheticEvent,
+            },
+            'OVI_LABS'
+          );
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      };
+
+      const handleMouseDown = (event: MouseEvent) => {
+        if (event.button === 2) {
+          setInputDebugInfo(
+            `mousedown:right activeTool=${getActiveToolName() || 'none'}`
+          );
+        }
+      };
+
+      element.addEventListener('mousedown', handleMouseDown, true);
+      element.addEventListener('contextmenu', handleContextMenu, true);
+
+      if (!isTouchCapableDevice()) {
+        return () => {
+          element.removeEventListener('mousedown', handleMouseDown, true);
+          element.removeEventListener('contextmenu', handleContextMenu, true);
+        };
+      }
 
       element.addEventListener('pointerdown', handlePencilDown);
       element.addEventListener('pointerup', handlePencilUp);
@@ -745,6 +932,9 @@ const OHIFCornerstoneViewport = React.memo(
       element.addEventListener('touchcancel', handleTouchEnd, { passive: false, capture: true });
 
       return () => {
+        clearContourLongPress();
+        element.removeEventListener('mousedown', handleMouseDown, true);
+        element.removeEventListener('contextmenu', handleContextMenu, true);
         element.removeEventListener('pointerdown', handlePencilDown);
         element.removeEventListener('pointerup', handlePencilUp);
         element.removeEventListener('pointercancel', handlePencilUp);
@@ -835,9 +1025,17 @@ const OHIFCornerstoneViewport = React.memo(
         <div className="viewport-wrapper">
           <div
             className="cornerstone-viewport-element"
-            style={{ height: '100%', width: '100%' }}
+            style={{
+              height: '100%',
+              width: '100%',
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
+              WebkitTouchCallout: 'none',
+            }}
             onContextMenu={e => e.preventDefault()}
             onMouseDown={e => e.preventDefault()}
+            onSelectStart={e => e.preventDefault()}
+            onDragStart={e => e.preventDefault()}
             ref={el => {
               resizeRef.current = el;
               elementRef.current = el;
@@ -874,7 +1072,11 @@ const OHIFCornerstoneViewport = React.memo(
             />
           )}
         </div>
-        <div className="pointer-events-none absolute left-2 top-2 z-40 max-w-[80%] rounded bg-black/70 px-2 py-1 font-mono text-[10px] leading-tight text-white">
+        <div
+          className={`pointer-events-none absolute left-2 z-40 max-w-[80%] rounded bg-black/70 px-2 py-1 font-mono text-[10px] leading-tight text-white ${
+            isTouchCapableDevice() ? 'top-2' : 'bottom-2'
+          }`}
+        >
           <div>{inputDebugInfo || 'input: idle'}</div>
           <div>{contourDebugInfo || 'contour: idle'}</div>
         </div>

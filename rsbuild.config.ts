@@ -150,7 +150,16 @@ export default defineConfig({
         target: process.env.REACT_APP_ORTHANC_URL || 'http://localhost:8042',
         changeOrigin: true,
       },
+      '/orthanc-api': {
+        target: process.env.REACT_APP_ORTHANC_URL || 'http://localhost:8042',
+        changeOrigin: true,
+        pathRewrite: { '^/orthanc-api': '' },
+      },
       '/api/auth': {
+        target: process.env.AUTH_SERVICE_URL || 'http://localhost:5000',
+        changeOrigin: true,
+      },
+      '/api/segmentation-frames': {
         target: process.env.AUTH_SERVICE_URL || 'http://localhost:5000',
         changeOrigin: true,
       },

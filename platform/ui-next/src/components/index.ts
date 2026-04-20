@@ -97,6 +97,7 @@ import { StudySummary } from './StudySummary';
 import { ErrorBoundary } from './Errorboundary';
 import { Header } from './Header';
 import { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent } from './Card';
+import { SegmentCard } from './SegmentCard/SegmentCard';
 import {
   ViewportActionButton,
   PatientInfo,
@@ -234,6 +235,7 @@ export {
   CardTitle,
   CardDescription,
   CardContent,
+  SegmentCard,
   ViewportActionButton,
   PatientInfo,
   ViewportActionBar,

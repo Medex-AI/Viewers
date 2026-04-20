@@ -34,16 +34,21 @@ const SegmentationExpandedHeader = ({ children }: { children: React.ReactNode })
 const SegmentationExpandedDropdownMenu = ({ children }: { children: React.ReactNode }) => {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-1"
-          onClick={e => e.stopPropagation()}
-        >
-          <Icons.More />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="ml-1"
+              onClick={e => e.stopPropagation()}
+            >
+              <Icons.More />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Segmentation options</TooltipContent>
+      </Tooltip>
       {children}
     </DropdownMenu>
   );

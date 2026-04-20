@@ -341,6 +341,12 @@ class ManualContourTool extends PlanarFreehandROITool {
         return;
       }
 
+      // Plain right-click is now reserved for the contour context menu.
+      // Hold Alt or Shift to use the direct point add/remove editing path.
+      if (!event.altKey && !event.shiftKey) {
+        return;
+      }
+
       if (!element || !canvasCoords) {
         return;
       }
@@ -637,6 +643,23 @@ class ManualContourTool extends PlanarFreehandROITool {
     }
 
     const contourAnnotation = completedAnnotation as ContourAnnotation;
+
+    // Stamp the active segment color onto the annotation so it persists after segment changes
+    const activeColor =
+      typeof window !== 'undefined' ? (window as any).__oviActiveManualContourColor : undefined;
+    if (activeColor && contourAnnotation.data) {
+      contourAnnotation.data.labelColor = activeColor;
+      contourAnnotation.data.fillColor = activeColor;
+      annotation.config.style.setAnnotationStyles(contourAnnotation.annotationUID || '', {
+        color: activeColor,
+        colorHighlighted: activeColor,
+        colorSelected: activeColor,
+        fillColor: activeColor,
+        fillOpacity: 0.2,
+        renderFill: true,
+      });
+    }
+
     const contourPoints = contourAnnotation.data?.contour?.polyline || [];
     const isClosed = contourAnnotation.data?.contour?.closed || false;
 

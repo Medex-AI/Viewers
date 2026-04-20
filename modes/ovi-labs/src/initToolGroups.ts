@@ -16,6 +16,20 @@ function initToolGroups(extensionManager, toolGroupService) {
       { toolName: toolNames.Bidirectional },
       { toolName: toolNames.Probe },
       { toolName: toolNames.DebugProbe },
+      {
+        toolName: 'CircularBrush',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'FILL_INSIDE_CIRCLE',
+        },
+      },
+      {
+        toolName: 'CircularEraser',
+        parentTool: 'Brush',
+        configuration: {
+          activeStrategy: 'ERASE_INSIDE_CIRCLE',
+        },
+      },
       { toolName: toolNames.EllipticalROI },
       { toolName: toolNames.CircleROI },
       { toolName: toolNames.RectangleROI },

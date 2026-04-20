@@ -1,28 +1,153 @@
-import { eventTarget, getEnabledElement, getEnabledElementByIds, utilities as csUtils } from '@cornerstonejs/core';
+import {
+  eventTarget,
+  getEnabledElement,
+  getEnabledElementByIds,
+  utilities as csUtils,
+  Enums as CoreEnums,
+} from '@cornerstonejs/core';
 import { annotation, Enums, utilities } from '@cornerstonejs/tools';
 import { DicomMetadataStore } from '@ohif/core';
 import ManualContourLabelMenu from '../components/ManualContourLabelMenu';
+import {
+  ensureOviSegmentationForViewport,
+  getOviSegmentationIdForDisplaySet,
+  getOviSegmentIndexForLabelId,
+  readActiveSegmentationFrames,
+  syncDerivedContoursFromSegmentation,
+  writeMaskToActiveSegmentation,
+  writeContourToActiveSegmentation,
+  OVI_SEGMENTATION_LABELS,
+} from '../../../../extensions/ovi-labs/src/utils/oviSegmentation';
+import {
+  deleteSegmentationFrame,
+  loadSegmentationFrames,
+  saveSegmentationFrame,
+} from '../../../../extensions/ovi-labs/src/utils/segmentationPersistence';
+import {
+  getContrastColor,
+  hexToRgba255,
+  lightenHexColor,
+} from '../../../../extensions/ovi-labs/src/utils/colorUtils';
 
 const TOOL_NAME = 'ManualContour';
+const BRUSH_TOOL_NAME = 'CircularBrush';
+const ERASER_TOOL_NAME = 'CircularEraser';
 const TOOL_GROUP_ID = 'default';
 const CONTOUR_LINE_WIDTH = '2';
 const DEFAULT_FILL_OPACITY = 0.2;
-const LABELS = [
-  { id: 'uterineCavity', label: 'Uterine cavity', color: '#22D3EE' },
-  { id: 'endometrium', label: 'Endometrium', color: '#F472B6' },
-  { id: 'myometrium', label: 'Myometrium', color: '#FBBF24' },
-  { id: 'junctionalZone', label: 'Junctional zone', color: '#60A5FA' },
-];
+const LABELS = OVI_SEGMENTATION_LABELS.map(({ id, name, color }) => ({
+  id,
+  label: name,
+  color,
+}));
+const ERASER_LABEL = { id: 'eraser', label: 'Eraser', color: '#FFFFFF' };
+const LABEL_OPTIONS = [ERASER_LABEL, ...LABELS];
+const BRUSH_TOOL_NAMES = [BRUSH_TOOL_NAME, ERASER_TOOL_NAME];
+const DEFAULT_BRUSH_SIZE = 3;
+const BRUSH_SIZE_MIN = 0.5;
+const BRUSH_SIZE_MAX = 99.5;
+const { segmentation: segmentationUtils } = utilities as typeof utilities & {
+  segmentation?: {
+    getBrushSizeForToolGroup?: (toolGroupId: string) => number;
+    setBrushSizeForToolGroup?: (toolGroupId: string, brushSize: number, toolName?: string) => void;
+    invalidateBrushCursor?: (toolGroupId: string) => void;
+  };
+};
 
 let activeLabelId = LABELS[0].id;
 let isManualContourActive = false;
 let activeViewportHintTargets: HTMLElement[] = [];
+let currentBrushSize = DEFAULT_BRUSH_SIZE;
+let brushCursorOverlay: HTMLDivElement | null = null;
+let gestureHudOverlay: HTMLDivElement | null = null;
+let currentCanvasPxPerMm: number | null = null;
+let lastNonEraserLabelId = LABELS[0].id;
+let currentBrushPointerType: string | null = null;
+let saveTimeoutBySegmentationId = new Map<string, number>();
+let restoredSegmentationKeys = new Set<string>();
+
+const OVI_CANVAS_SCALE_EVENT = 'ovi-canvas-scale-change';
+const OVI_ACTIVE_LABEL_EVENT = 'ovi-set-active-label';
+
+const pushOviBrushDebug = (message: string, details?: Record<string, unknown>) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const payload = {
+    ts: new Date().toISOString(),
+    message,
+    ...(details || {}),
+  };
+
+  const debugWindow = window as Window & {
+    __oviBrushDebugLog?: Array<Record<string, unknown>>;
+    __oviBrushDebugLast?: Record<string, unknown>;
+  };
+
+  debugWindow.__oviBrushDebugLog = debugWindow.__oviBrushDebugLog || [];
+  debugWindow.__oviBrushDebugLog.push(payload);
+  debugWindow.__oviBrushDebugLast = payload;
+  console.debug('[OVI Brush Debug]', payload);
+};
+
+const computeCanvasPxPerMm = (element: HTMLElement): number | null => {
+  try {
+    const enabledEl = getEnabledElement(element);
+    const camera = (enabledEl?.viewport as any)?.getCamera?.();
+    if (!camera?.parallelScale || !element.clientHeight) {
+      return null;
+    }
+    return element.clientHeight / (camera.parallelScale * 2);
+  } catch {
+    return null;
+  }
+};
 const isTouchCapableDevice = () =>
   typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
-const getLabelConfig = labelId => LABELS.find(label => label.id === labelId) || LABELS[0];
+const shouldUseNativeBrushCursor = () => {
+  // Temporary demo workaround:
+  // on tablet + stylus we force the non-native OVI brush cursor path because
+  // the native Cornerstone brush cursor does not currently behave correctly.
+  // The proper fix should map stylus behavior to the same hover/cursor lifecycle
+  // as desktop pointer hover instead of branching cursor implementations here.
+  return !(isTouchCapableDevice() && currentBrushPointerType === 'pen');
+};
+
+const getLabelConfig = labelId => LABEL_OPTIONS.find(label => label.id === labelId) || LABELS[0];
 
 export const getActiveManualContourLabelId = () => activeLabelId;
+
+const isEraserLabelId = (labelId?: string) => labelId === ERASER_LABEL.id;
+
+export const setActiveManualContourLabelId = (
+  labelId: string,
+  servicesManager?: AppTypes.ServicesManager,
+  sourceToolName = TOOL_NAME
+) => {
+  if (!labelId) {
+    return;
+  }
+
+  if (servicesManager) {
+    return updateActiveLabel(labelId, servicesManager, sourceToolName);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(OVI_ACTIVE_LABEL_EVENT, {
+        detail: {
+          labelId,
+          sourceToolName,
+          _isFromTool: true,
+        },
+      })
+    );
+  }
+
+  return undefined;
+};
 
 const setGlobalActiveManualContourLabelId = (labelId: string) => {
   if (typeof window === 'undefined') {
@@ -33,38 +158,269 @@ const setGlobalActiveManualContourLabelId = (labelId: string) => {
     labelId;
 };
 
-const lightenHexColor = (hexColor: string, ratio = 0.35) => {
-  const hex = hexColor.replace('#', '');
-  if (hex.length !== 6) {
-    return hexColor;
+const clampBrushSize = (value: number) =>
+  Math.min(BRUSH_SIZE_MAX, Math.max(BRUSH_SIZE_MIN, Number(value) || DEFAULT_BRUSH_SIZE));
+
+const getBrushSize = () => {
+  const brushSize = segmentationUtils?.getBrushSizeForToolGroup?.(TOOL_GROUP_ID);
+  if (typeof brushSize === 'number' && !Number.isNaN(brushSize)) {
+    currentBrushSize = clampBrushSize(brushSize);
   }
 
-  const num = parseInt(hex, 16);
-  const r = Math.min(255, Math.round(((num >> 16) & 0xff) * (1 - ratio) + 255 * ratio));
-  const g = Math.min(255, Math.round(((num >> 8) & 0xff) * (1 - ratio) + 255 * ratio));
-  const b = Math.min(255, Math.round((num & 0xff) * (1 - ratio) + 255 * ratio));
-
-  return `#${[r, g, b].map(channel => channel.toString(16).padStart(2, '0')).join('')}`;
+  return currentBrushSize;
 };
 
-const updateToolButtonColor = (color: string) => {
-  // Update the toolbar button color to match the active label
-  if (typeof window === 'undefined') {
+const setBrushSize = (value: number) => {
+  const brushSize = clampBrushSize(value);
+  currentBrushSize = brushSize;
+  BRUSH_TOOL_NAMES.forEach(toolName => {
+    segmentationUtils?.setBrushSizeForToolGroup?.(TOOL_GROUP_ID, brushSize, toolName);
+  });
+};
+
+const ensureBrushCursorOverlay = () => {
+  if (shouldUseNativeBrushCursor()) {
+    return null;
+  }
+
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  if (!brushCursorOverlay) {
+    brushCursorOverlay = document.createElement('div');
+    brushCursorOverlay.className = 'ovi-brush-cursor-overlay';
+    brushCursorOverlay.style.position = 'fixed';
+    brushCursorOverlay.style.pointerEvents = 'none';
+    brushCursorOverlay.style.borderRadius = '9999px';
+    brushCursorOverlay.style.borderStyle = 'solid';
+    brushCursorOverlay.style.borderWidth = '2px';
+    brushCursorOverlay.style.boxSizing = 'border-box';
+    brushCursorOverlay.style.transform = 'translate(-50%, -50%)';
+    brushCursorOverlay.style.outline = 'none';
+    brushCursorOverlay.style.boxShadow = 'none';
+    brushCursorOverlay.style.background = 'transparent';
+    brushCursorOverlay.style.zIndex = '2147483647';
+    brushCursorOverlay.style.display = 'none';
+    document.body.appendChild(brushCursorOverlay);
+  }
+
+  return brushCursorOverlay;
+};
+
+const hideBrushCursorOverlay = () => {
+  if (shouldUseNativeBrushCursor()) {
     return;
   }
 
-  const toolButton = window.document?.querySelector(`[data-tool="${TOOL_NAME}"]`);
-  if (toolButton instanceof HTMLElement) {
-    // Find the button element (could be nested)
-    const buttonElement = toolButton.querySelector('button') || toolButton;
-    if (buttonElement instanceof HTMLElement) {
-      // Apply the color as a border and subtle background when active
-      buttonElement.style.setProperty('border', `2px solid ${color}`, 'important');
-      if (toolButton.getAttribute('data-active') === 'true') {
-        buttonElement.style.setProperty('background-color', `${color}20`, 'important');
-      }
-    }
+  if (brushCursorOverlay) {
+    brushCursorOverlay.style.display = 'none';
   }
+};
+
+const ensureGestureHudOverlay = () => {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  if (!gestureHudOverlay) {
+    gestureHudOverlay = document.createElement('div');
+    gestureHudOverlay.className = 'ovi-pencil-gesture-hud';
+    gestureHudOverlay.style.position = 'fixed';
+    gestureHudOverlay.style.top = '20px';
+    gestureHudOverlay.style.left = '50%';
+    gestureHudOverlay.style.transform = 'translateX(-50%)';
+    gestureHudOverlay.style.padding = '8px 12px';
+    gestureHudOverlay.style.borderRadius = '9999px';
+    gestureHudOverlay.style.background = 'rgba(15, 23, 42, 0.9)';
+    gestureHudOverlay.style.color = '#F8FAFC';
+    gestureHudOverlay.style.fontSize = '12px';
+    gestureHudOverlay.style.fontWeight = '600';
+    gestureHudOverlay.style.pointerEvents = 'none';
+    gestureHudOverlay.style.zIndex = '2147483647';
+    gestureHudOverlay.style.display = 'none';
+    document.body.appendChild(gestureHudOverlay);
+  }
+
+  return gestureHudOverlay;
+};
+
+const showGestureHud = (message: string) => {
+  const hud = ensureGestureHudOverlay();
+  if (!hud) {
+    return;
+  }
+
+  hud.textContent = message;
+  hud.style.display = 'block';
+  window.setTimeout(() => {
+    if (hud.textContent === message) {
+      hud.style.display = 'none';
+    }
+  }, 1200);
+};
+
+const restoreViewportCursor = () => {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  document.querySelectorAll('[data-viewport-uid]').forEach(viewport => {
+    if (viewport instanceof HTMLElement) {
+      viewport.style.removeProperty('cursor');
+    }
+  });
+};
+
+const getViewportElementAtPoint = (clientX: number, clientY: number): HTMLElement | null => {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const el = document.elementFromPoint(clientX, clientY);
+  if (!el) {
+    return null;
+  }
+
+  const viewport = el.closest('[data-viewport-uid]');
+  return viewport instanceof HTMLElement ? viewport : null;
+};
+
+const syncBrushCursorOverlay = (
+  element?: HTMLElement,
+  canvasPoint?: { x?: number; y?: number } | number[]
+) => {
+  if (shouldUseNativeBrushCursor()) {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  const overlay = ensureBrushCursorOverlay();
+  if (!overlay || !element || !canvasPoint) {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  const x = Array.isArray(canvasPoint) ? canvasPoint[0] : canvasPoint.x;
+  const y = Array.isArray(canvasPoint) ? canvasPoint[1] : canvasPoint.y;
+  if (typeof x !== 'number' || typeof y !== 'number') {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  if (x < 0 || y < 0 || x > element.clientWidth || y > element.clientHeight) {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  const pxPerMm = computeCanvasPxPerMm(element) ?? currentCanvasPxPerMm ?? 1;
+  currentCanvasPxPerMm = pxPerMm;
+
+  const rect = element.getBoundingClientRect();
+  const { color } = getLabelConfig(activeLabelId);
+  const diameter = Math.max(8, getBrushSize() * 2 * pxPerMm);
+
+  overlay.style.display = 'block';
+  overlay.style.left = `${rect.left + x}px`;
+  overlay.style.top = `${rect.top + y}px`;
+  overlay.style.width = `${diameter}px`;
+  overlay.style.height = `${diameter}px`;
+  overlay.style.borderColor = color;
+  overlay.style.backgroundColor = 'transparent';
+};
+
+const syncBrushCursorOverlayAtClient = (clientX: number, clientY: number) => {
+  if (shouldUseNativeBrushCursor()) {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  const overlay = ensureBrushCursorOverlay();
+  if (!overlay) {
+    return;
+  }
+
+  const viewportEl = getViewportElementAtPoint(clientX, clientY);
+  if (!viewportEl) {
+    hideBrushCursorOverlay();
+    return;
+  }
+
+  const pxPerMm = computeCanvasPxPerMm(viewportEl) ?? currentCanvasPxPerMm ?? 1;
+  currentCanvasPxPerMm = pxPerMm;
+
+  const { color } = getLabelConfig(activeLabelId);
+  const diameter = Math.max(8, getBrushSize() * 2 * pxPerMm);
+
+  overlay.style.display = 'block';
+  overlay.style.left = `${clientX}px`;
+  overlay.style.top = `${clientY}px`;
+  overlay.style.width = `${diameter}px`;
+  overlay.style.height = `${diameter}px`;
+  overlay.style.borderColor = color;
+  overlay.style.backgroundColor = 'transparent';
+};
+
+const getToolbarButtonElements = (toolNames: string[]) => {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+
+  return toolNames
+    .flatMap(toolName => {
+      const toolRoot = window.document.querySelector(`[data-tool="${toolName}"]`);
+      if (!(toolRoot instanceof HTMLElement)) {
+        return [];
+      }
+
+      const innerButton = toolRoot.querySelector('button');
+      return [innerButton instanceof HTMLElement ? innerButton : toolRoot];
+    })
+    .filter((element): element is HTMLElement => element instanceof HTMLElement);
+};
+
+const updateToolButtonColor = (
+  toolNames: string[],
+  color: string,
+  isActive: boolean
+) => {
+  const foregroundColor = getContrastColor(color);
+  const buttonElements = getToolbarButtonElements(toolNames);
+
+  buttonElements.forEach(buttonElement => {
+    if (isActive) {
+      buttonElement.style.setProperty('border', `2px solid ${color}`, 'important');
+      buttonElement.style.setProperty('box-shadow', 'none', 'important');
+      buttonElement.style.setProperty('background-color', color, 'important');
+      buttonElement.style.setProperty('color', foregroundColor, 'important');
+    } else {
+      buttonElement.style.removeProperty('border');
+      buttonElement.style.removeProperty('box-shadow');
+      buttonElement.style.removeProperty('background-color');
+      buttonElement.style.removeProperty('color');
+    }
+
+    buttonElement.querySelectorAll('svg').forEach(icon => {
+      if (!(icon instanceof SVGElement || icon instanceof HTMLElement)) {
+        return;
+      }
+
+      if (isActive) {
+        icon.style.setProperty('color', foregroundColor, 'important');
+      } else {
+        icon.style.removeProperty('color');
+      }
+    });
+  });
+};
+
+const syncToolbarButtonColors = servicesManager => {
+  const { color } = getLabelConfig(activeLabelId);
+  const toolGroupService = servicesManager?.services?.toolGroupService;
+  const activeTool = toolGroupService?.getActivePrimaryMouseButtonTool?.(TOOL_GROUP_ID);
+
+  updateToolButtonColor([TOOL_NAME], color, activeTool === TOOL_NAME);
+  updateToolButtonColor([BRUSH_TOOL_NAME, ERASER_TOOL_NAME, 'Brush'], color, BRUSH_TOOL_NAMES.includes(activeTool));
 };
 
 const applyToolGroupStyle = labelId => {
@@ -72,6 +428,16 @@ const applyToolGroupStyle = labelId => {
   const highlightColor = lightenHexColor(color);
   const toolGroupStyles = annotation.config.style.getToolGroupToolStyles(TOOL_GROUP_ID) || {};
   const toolSpecificStyles = toolGroupStyles[TOOL_NAME] || {};
+
+  const brushCursorStyle = {
+    color,
+    colorHighlighted: color,
+    colorSelected: color,
+    lineWidth: CONTOUR_LINE_WIDTH,
+    fillColor: color,
+    fillOpacity: 0,
+    renderFill: false,
+  };
 
   annotation.config.style.setToolGroupToolStyles(TOOL_GROUP_ID, {
     ...toolGroupStyles,
@@ -85,10 +451,12 @@ const applyToolGroupStyle = labelId => {
       fillOpacity: DEFAULT_FILL_OPACITY,
       renderFill: true,
     },
+    [BRUSH_TOOL_NAME]: brushCursorStyle,
+    [ERASER_TOOL_NAME]: { ...brushCursorStyle, color: ERASER_LABEL.color, colorHighlighted: ERASER_LABEL.color, colorSelected: ERASER_LABEL.color },
   });
 
-  // Update the toolbar button color
-  updateToolButtonColor(color);
+  // Update the toolbar buttons to reflect the shared active annotation color.
+  syncToolbarButtonColors(undefined);
 };
 
 const applyAnnotationStyle = (annotationUID, labelId) => {
@@ -105,10 +473,196 @@ const applyAnnotationStyle = (annotationUID, labelId) => {
   });
 };
 
-const updateActiveLabel = labelId => {
+const updateBrushSegment = async (servicesManager, labelId: string, viewportId?: string) => {
+  if (isEraserLabelId(labelId)) {
+    pushOviBrushDebug('updateBrushSegment: skipped for eraser', { labelId });
+    return;
+  }
+
+  const { segmentationService } = servicesManager?.services || {};
+  const context = await ensureOviSegmentationForViewport(servicesManager, viewportId);
+  const segmentIndex = getOviSegmentIndexForLabelId(labelId);
+  const labelConfig = getLabelConfig(labelId);
+
+  if (!context?.viewportId || !context?.segmentationId || !segmentIndex || !segmentationService) {
+    pushOviBrushDebug('updateBrushSegment: missing context', {
+      labelId,
+      requestedViewportId: viewportId,
+      segmentIndex,
+      hasContext: Boolean(context),
+      hasSegmentationService: Boolean(segmentationService),
+    });
+    return;
+  }
+
+  segmentationService.setActiveSegmentation(context.viewportId, context.segmentationId);
+  segmentationService.setSegmentColor(
+    context.viewportId,
+    context.segmentationId,
+    segmentIndex,
+    hexToRgba255(labelConfig.color)
+  );
+  segmentationService.setActiveSegment(context.segmentationId, segmentIndex);
+  segmentationUtils?.invalidateBrushCursor?.(TOOL_GROUP_ID);
+  pushOviBrushDebug('updateBrushSegment: active segment set', {
+    labelId,
+    labelColor: labelConfig.color,
+    requestedViewportId: viewportId,
+    viewportId: context.viewportId,
+    segmentationId: context.segmentationId,
+    segmentIndex,
+    activeSegmentation: segmentationService.getActiveSegmentation?.(context.viewportId),
+    activeSegmentViewport: segmentationService.getActiveSegment?.(context.viewportId),
+    activeSegmentSegmentation: segmentationService.getActiveSegment?.(context.segmentationId),
+    resolvedSegmentColor: segmentationService.getSegmentColor?.(
+      context.viewportId,
+      context.segmentationId,
+      segmentIndex
+    ),
+  });
+};
+
+const ensureBrushToolReady = async (
+  servicesManager,
+  labelId: string,
+  sourceToolName: string,
+  viewportId?: string
+) => {
+  pushOviBrushDebug('ensureBrushToolReady: begin', {
+    labelId,
+    sourceToolName,
+    requestedViewportId: viewportId,
+    isEraser: isEraserLabelId(labelId),
+  });
+  if (isEraserLabelId(labelId)) {
+    const context = await ensureOviSegmentationForViewport(servicesManager, viewportId);
+    pushOviBrushDebug('ensureBrushToolReady: eraser ready', {
+      hasSegmentation: Boolean(context),
+      requestedViewportId: viewportId,
+      viewportId: context?.viewportId,
+      segmentationId: context?.segmentationId,
+    });
+    return {
+      canActivate: true,
+      toolName: ERASER_TOOL_NAME,
+      hasSegmentation: Boolean(context),
+    };
+  }
+
+  const nextToolName = BRUSH_TOOL_NAMES.includes(sourceToolName) ? BRUSH_TOOL_NAME : sourceToolName;
+  const context = await ensureOviSegmentationForViewport(servicesManager, viewportId);
+
+  if (BRUSH_TOOL_NAMES.includes(nextToolName)) {
+    if (!context) {
+      pushOviBrushDebug('ensureBrushToolReady: no segmentation context', {
+        labelId,
+        sourceToolName,
+        requestedViewportId: viewportId,
+        nextToolName,
+      });
+      return {
+        canActivate: false,
+        toolName: nextToolName,
+        hasSegmentation: false,
+      };
+    }
+
+    await updateBrushSegment(servicesManager, labelId, viewportId);
+  }
+
+  pushOviBrushDebug('ensureBrushToolReady: completed', {
+    labelId,
+    sourceToolName,
+    nextToolName,
+    requestedViewportId: viewportId,
+    hasSegmentation: Boolean(context),
+    viewportId: context?.viewportId,
+    segmentationId: context?.segmentationId,
+  });
+  return {
+    canActivate: true,
+    toolName: nextToolName,
+    hasSegmentation: Boolean(context),
+  };
+};
+
+const setPrimaryTool = (servicesManager, toolName: string) => {
+  const toolGroupService = servicesManager?.services?.toolGroupService;
+  const toolGroup = toolGroupService?.getToolGroup?.(TOOL_GROUP_ID);
+  if (!toolGroup) {
+    pushOviBrushDebug('setPrimaryTool: missing toolGroup', { toolName });
+    return;
+  }
+
+  try {
+    // Deactivate the currently active primary tool first
+    const activeToolName = toolGroup.getActivePrimaryMouseButtonTool?.();
+    if (activeToolName && activeToolName !== toolName) {
+      toolGroup.setToolPassive(activeToolName);
+    }
+    toolGroup.setToolActive(toolName, {
+      bindings: [{ mouseButton: Enums.MouseBindings.Primary }],
+    });
+    pushOviBrushDebug('setPrimaryTool: activated', { toolName, toolGroupId: TOOL_GROUP_ID });
+  } catch (error) {
+    pushOviBrushDebug('setPrimaryTool: activation failed', {
+      toolName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.warn(`Failed to activate ${toolName}:`, error);
+  }
+};
+
+const updateActiveLabel = async (
+  labelId,
+  servicesManager,
+  sourceToolName = TOOL_NAME,
+  viewportId?: string
+) => {
+  pushOviBrushDebug('updateActiveLabel: begin', {
+    labelId,
+    sourceToolName,
+    requestedViewportId: viewportId,
+    previousLabelId: activeLabelId,
+  });
   activeLabelId = labelId;
+  if (!isEraserLabelId(labelId)) {
+    lastNonEraserLabelId = labelId;
+  }
   setGlobalActiveManualContourLabelId(labelId);
+  // Notify the segmentation panel of the active label change (panel → tool direction is separate)
+  window?.dispatchEvent?.(
+    new CustomEvent(OVI_ACTIVE_LABEL_EVENT, { detail: { labelId, sourceToolName, _isFromTool: true } })
+  );
   applyToolGroupStyle(activeLabelId);
+
+  // Immediately recolor the cursor overlay without waiting for the next mouse move
+  if (!shouldUseNativeBrushCursor() && brushCursorOverlay && brushCursorOverlay.style.display !== 'none') {
+    const { color } = getLabelConfig(labelId);
+    brushCursorOverlay.style.borderColor = color;
+    brushCursorOverlay.style.backgroundColor = isEraserLabelId(labelId) ? 'transparent' : `${color}26`;
+  }
+
+  const brushToolState = await ensureBrushToolReady(
+    servicesManager,
+    labelId,
+    sourceToolName,
+    viewportId
+  );
+  if (brushToolState.canActivate) {
+    setPrimaryTool(servicesManager, brushToolState.toolName);
+  }
+  pushOviBrushDebug('updateActiveLabel: completed', {
+    labelId,
+    sourceToolName,
+    requestedViewportId: viewportId,
+    nextToolName: brushToolState.toolName,
+    canActivate: brushToolState.canActivate,
+    hasSegmentation: brushToolState.hasSegmentation,
+  });
+
+  syncToolbarButtonColors(servicesManager);
+
   // Deselect all annotations so the tool starts a fresh draw rather than
   // editing the previously selected annotation of a different class.
   try {
@@ -131,40 +685,26 @@ const updateAnnotationLabel = (annotationToUpdate, labelId, element) => {
     labelId,
     labelName: labelConfig.label,
     labelColor: labelConfig.color,
+    fillColor: labelConfig.color,
+    fillOpacity: annotationToUpdate.data?.fillOpacity ?? DEFAULT_FILL_OPACITY,
+    renderFill: annotationToUpdate.data?.renderFill ?? true,
     modelType,
     modifiedAt: Date.now(),
   };
 
   applyAnnotationStyle(annotationToUpdate.annotationUID, labelId);
+  if (element) {
+    const viewportIdsToRender = utilities.viewportFilters.getViewportIdsWithToolToRender(
+      element,
+      TOOL_NAME
+    );
+    utilities.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
+  }
   annotation.state.triggerAnnotationModified(
     annotationToUpdate,
     element,
     Enums.ChangeTypes.LabelChange
   );
-
-  const frameOfReferenceUID = annotationToUpdate.metadata?.FrameOfReferenceUID;
-  const annotationManager = annotation.state.getAnnotationManager();
-
-  if (!frameOfReferenceUID || !annotationManager) {
-    return;
-  }
-
-  const existingAnnotations =
-    annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
-
-  // Only remove annotations with same labelId AND same referencedImageId (same time frame)
-  const currentImageId = annotationToUpdate.metadata?.referencedImageId;
-
-  existingAnnotations.forEach(existingAnnotation => {
-    if (
-      existingAnnotation.annotationUID !== annotationToUpdate.annotationUID &&
-      existingAnnotation.data?.labelId === labelId &&
-      (existingAnnotation.data?.modelType || 'manual') === modelType &&
-      existingAnnotation.metadata?.referencedImageId === currentImageId
-    ) {
-      annotation.state.removeAnnotation(existingAnnotation.annotationUID);
-    }
-  });
 };
 
 const getActiveViewportContext = servicesManager => {
@@ -184,6 +724,103 @@ const getActiveViewportContext = servicesManager => {
     element: viewportInfo?.element,
     viewportInfo,
   };
+};
+
+const getViewportIdForElement = (element?: HTMLElement | null) => {
+  if (!element) {
+    return undefined;
+  }
+
+  try {
+    const enabledElement = getEnabledElement(element);
+    return enabledElement?.viewport?.id;
+  } catch {
+    return undefined;
+  }
+};
+
+const installBrushFirstUseGuard = (servicesManager: AppTypes.ServicesManager) => {
+  const toolGroupService = servicesManager?.services?.toolGroupService;
+  const { segmentationService, uiNotificationService } = servicesManager?.services || {};
+  const toolGroup = toolGroupService?.getToolGroup?.(TOOL_GROUP_ID);
+
+  if (!toolGroup || !segmentationService) {
+    return;
+  }
+
+  BRUSH_TOOL_NAMES.forEach(toolName => {
+    const toolInstance = toolGroup.getToolInstance?.(toolName) as
+      | {
+          preMouseDownCallback?: (evt: any) => boolean;
+          __oviOriginalPreMouseDownCallback?: (evt: any) => boolean;
+          __oviFirstUseGuardInstalled?: boolean;
+        }
+      | undefined;
+
+    if (!toolInstance || toolInstance.__oviFirstUseGuardInstalled) {
+      return;
+    }
+
+    const originalPreMouseDown = toolInstance.preMouseDownCallback?.bind(toolInstance);
+    toolInstance.__oviOriginalPreMouseDownCallback = originalPreMouseDown;
+    toolInstance.__oviFirstUseGuardInstalled = true;
+
+    toolInstance.preMouseDownCallback = evt => {
+      const element = evt?.detail?.element as HTMLElement | undefined;
+      const viewportId = getViewportIdForElement(element) || getActiveViewportContext(servicesManager)?.activeViewportId;
+      const activeSegmentation = viewportId
+        ? segmentationService.getActiveSegmentation?.(viewportId)
+        : null;
+
+      if (!activeSegmentation?.segmentationId) {
+        pushOviBrushDebug('brush first-use guard: initializing segmentation before draw', {
+          toolName,
+          viewportId,
+          activeLabelId,
+        });
+
+        void ensureBrushToolReady(servicesManager, activeLabelId, toolName, viewportId).then(state => {
+          pushOviBrushDebug('brush first-use guard: initialization finished', {
+            toolName,
+            viewportId,
+            activeLabelId,
+            canActivate: state?.canActivate,
+            hasSegmentation: state?.hasSegmentation,
+            activeSegmentationAfterInit: viewportId
+              ? segmentationService.getActiveSegmentation?.(viewportId)
+              : null,
+            activeSegmentAfterInit: viewportId
+              ? segmentationService.getActiveSegment?.(viewportId)
+              : null,
+            representationsAfterInit:
+              viewportId && segmentationService.getActiveSegmentation?.(viewportId)?.segmentationId
+                ? segmentationService.getSegmentationRepresentations?.(viewportId, {
+                    segmentationId:
+                      segmentationService.getActiveSegmentation?.(viewportId)?.segmentationId,
+                    type: Enums.SegmentationRepresentations.Labelmap,
+                  })
+                : null,
+          });
+
+          if (state?.canActivate) {
+            setPrimaryTool(servicesManager, state.toolName);
+          }
+        });
+
+        uiNotificationService?.show?.({
+          title: 'OVI Labs Segmentation',
+          message: 'Preparing the default 4-class segmentation. Click once more when ready.',
+          type: 'info',
+          duration: 1800,
+        });
+
+        evt?.preventDefault?.();
+        return true;
+      }
+
+      return originalPreMouseDown ? originalPreMouseDown(evt) : undefined;
+    };
+  });
 };
 
 const getManualContourAnnotations = (frameOfReferenceUID?: string) => {
@@ -383,6 +1020,8 @@ export const showManualContourLabelMenu = ({
   annotation: targetAnnotation,
   element,
   defaultPosition: positionOverride,
+  servicesManager,
+  sourceToolName = TOOL_NAME,
 }) => {
   if (!uiDialogService) {
     return;
@@ -394,7 +1033,14 @@ export const showManualContourLabelMenu = ({
     positionOverride ||
     (typeof window !== 'undefined'
       ? (() => {
-          const toolButton = window.document?.querySelector(`[data-tool="${TOOL_NAME}"]`);
+          const menuAnchorToolName =
+            BRUSH_TOOL_NAMES.includes(sourceToolName) || isEraserLabelId(activeLabelId)
+              ? BRUSH_TOOL_NAME
+              : TOOL_NAME;
+          const toolButton =
+            window.document?.querySelector(`[data-tool="${menuAnchorToolName}"]`) ||
+            window.document?.querySelector(`[data-tool="${sourceToolName}"]`) ||
+            window.document?.querySelector(`[data-tool="Brush"]`);
           if (toolButton instanceof HTMLElement) {
             const rect = toolButton.getBoundingClientRect();
             const x = Math.min(
@@ -412,6 +1058,17 @@ export const showManualContourLabelMenu = ({
         })()
       : undefined);
 
+  // Seed the canvas scale from the active viewport so the preview is correct on first open
+  if (currentCanvasPxPerMm === null && servicesManager) {
+    const activeCtx = getActiveViewportContext(servicesManager);
+    if (activeCtx?.element instanceof HTMLElement) {
+      const seeded = computeCanvasPxPerMm(activeCtx.element);
+      if (seeded !== null) {
+        currentCanvasPxPerMm = seeded;
+      }
+    }
+  }
+
   uiDialogService.hide('manual-contour-label');
   uiDialogService.show({
     id: 'manual-contour-label',
@@ -424,14 +1081,26 @@ export const showManualContourLabelMenu = ({
     containerClassName: 'shadow-none',
     defaultPosition,
     contentProps: {
-      labelData: LABELS.map(item => ({ label: item.label, value: item.id })),
-      initialLabel: targetAnnotation?.data?.labelId || activeLabelId,
+      labelData: LABEL_OPTIONS.map(item => ({ label: item.label, value: item.id, color: item.color })),
+      initialLabel:
+        targetAnnotation?.data?.labelId && !isEraserLabelId(targetAnnotation?.data?.labelId)
+          ? targetAnnotation.data.labelId
+          : activeLabelId,
+      brushSize: getBrushSize(),
+      canvasPxPerMm: currentCanvasPxPerMm,
+      showBrushSizeControl: BRUSH_TOOL_NAMES.includes(sourceToolName),
+      onBrushSizeChange: value => setBrushSize(value),
       onSelect: value => {
         if (!value) {
           return;
         }
-        updateActiveLabel(value);
-        if (targetAnnotation) {
+        void updateActiveLabel(
+          value,
+          servicesManager,
+          sourceToolName,
+          getActiveViewportContext(servicesManager)?.activeViewportId
+        );
+        if (targetAnnotation && !isEraserLabelId(value)) {
           updateAnnotationLabel(targetAnnotation, value, element);
         }
       },
@@ -440,29 +1109,208 @@ export const showManualContourLabelMenu = ({
 };
 
 export default function setupManualContourBehavior(servicesManager: AppTypes.ServicesManager) {
-  const { uiDialogService } = servicesManager.services;
+  const { uiDialogService, segmentationService } = servicesManager.services;
+  let syncTimeoutId: number | null = null;
 
+  setBrushSize(getBrushSize());
   setGlobalActiveManualContourLabelId(activeLabelId);
   applyToolGroupStyle(activeLabelId);
+  syncToolbarButtonColors(servicesManager);
+  installBrushFirstUseGuard(servicesManager);
 
+  const queueCurrentFrameContourSync = (viewportId?: string, referencedImageId?: string) => {
+    if (syncTimeoutId !== null) {
+      window.clearTimeout(syncTimeoutId);
+    }
+
+    syncTimeoutId = window.setTimeout(() => {
+      void syncDerivedContoursFromSegmentation({
+        servicesManager,
+        viewportId,
+        referencedImageId,
+      });
+      syncTimeoutId = null;
+    }, 30);
+  };
+
+  const persistManualSegmentation = async (segmentationId: string) => {
+    const activeContext = getActiveViewportContext(servicesManager);
+    const activeViewportId = activeContext?.activeViewportId;
+    const currentImageId = activeContext?.viewport?.getCurrentImageId?.();
+    const instance = currentImageId ? DicomMetadataStore.getInstanceByImageId(currentImageId) : null;
+    const studyInstanceUID = instance?.StudyInstanceUID;
+    const seriesInstanceUID = instance?.SeriesInstanceUID;
+
+    if (!activeViewportId || !studyInstanceUID || !seriesInstanceUID) {
+      return;
+    }
+
+    const activeSegmentation = segmentationService.getActiveSegmentation(activeViewportId);
+    if (!activeSegmentation || activeSegmentation.segmentationId !== segmentationId) {
+      return;
+    }
+
+    const frames = await readActiveSegmentationFrames({
+      servicesManager,
+      viewportId: activeViewportId,
+    });
+
+    const labelMap = Object.fromEntries(
+      OVI_SEGMENTATION_LABELS.map(label => [
+        label.segmentIndex,
+        {
+          labelId: label.id,
+          labelName: label.name,
+          labelColor: label.color,
+        },
+      ])
+    );
+
+    for (const frame of frames) {
+      if (!frame.referencedImageId) {
+        continue;
+      }
+
+      const hasData = frame.scalarData.some(value => value !== 0);
+      if (!hasData) {
+        await deleteSegmentationFrame({
+          studyInstanceUID,
+          seriesInstanceUID,
+          model: 'manual',
+          frameKey: frame.referencedImageId,
+        });
+        continue;
+      }
+
+      await saveSegmentationFrame({
+        studyInstanceUID,
+        seriesInstanceUID,
+        model: 'manual',
+        frameKey: frame.referencedImageId,
+        frameNumber: frame.frameIndex + 1,
+        width: frame.width,
+        height: frame.height,
+        maskData: new Uint8Array(frame.scalarData),
+        labelMap,
+        updatedAt: Date.now(),
+      });
+    }
+  };
+
+  const restoreManualSegmentation = async (segmentationId: string) => {
+    const activeContext = getActiveViewportContext(servicesManager);
+    const activeViewportId = activeContext?.activeViewportId;
+    const currentImageId = activeContext?.viewport?.getCurrentImageId?.();
+    const instance = currentImageId ? DicomMetadataStore.getInstanceByImageId(currentImageId) : null;
+    const studyInstanceUID = instance?.StudyInstanceUID;
+    const seriesInstanceUID = instance?.SeriesInstanceUID;
+    const displaySetInstanceUID =
+      activeContext?.viewportInfo?.getDisplaySetOptions?.()?.[0]?.displaySetInstanceUID;
+    const expectedSegmentationId = displaySetInstanceUID
+      ? getOviSegmentationIdForDisplaySet(displaySetInstanceUID)
+      : null;
+
+    if (
+      !activeViewportId ||
+      !studyInstanceUID ||
+      !seriesInstanceUID ||
+      !expectedSegmentationId ||
+      segmentationId !== expectedSegmentationId
+    ) {
+      return;
+    }
+
+    const restoreKey = `${studyInstanceUID}:${seriesInstanceUID}:${segmentationId}`;
+    if (restoredSegmentationKeys.has(restoreKey)) {
+      return;
+    }
+
+    const frames = await loadSegmentationFrames(seriesInstanceUID, studyInstanceUID, 'manual');
+    restoredSegmentationKeys.add(restoreKey);
+    if (!frames.length) {
+      return;
+    }
+
+    for (const frame of frames) {
+      await writeMaskToActiveSegmentation({
+        servicesManager,
+        viewportId: activeViewportId,
+        referencedImageId: frame.frameKey,
+        maskData: frame.maskData,
+      });
+
+      await syncDerivedContoursFromSegmentation({
+        servicesManager,
+        viewportId: activeViewportId,
+        referencedImageId: frame.frameKey,
+      });
+    }
+  };
 
   const onToolActivated = evt => {
     const { toolGroupId, toolName } = evt.detail || {};
     if (toolGroupId !== TOOL_GROUP_ID) {
       return;
     }
+    pushOviBrushDebug('onToolActivated', {
+      toolGroupId,
+      toolName,
+      activeLabelId,
+    });
 
     if (toolName === TOOL_NAME) {
+      void ensureOviSegmentationForViewport(servicesManager);
+      hideBrushCursorOverlay();
+      restoreViewportCursor();
       isManualContourActive = true;
-      showManualContourLabelMenu({ uiDialogService });
+      // Sync panel to current active label
+      window?.dispatchEvent?.(
+        new CustomEvent(OVI_ACTIVE_LABEL_EVENT, { detail: { labelId: activeLabelId, sourceToolName: TOOL_NAME, _isFromTool: true } })
+      );
+      showManualContourLabelMenu({
+        uiDialogService,
+        servicesManager,
+        sourceToolName: TOOL_NAME,
+      });
       renderManualContourHints();
-      // Update button color when tool is activated
-      setTimeout(() => {
-        const { color } = getLabelConfig(activeLabelId);
-        updateToolButtonColor(color);
-      }, 100);
+      setTimeout(() => syncToolbarButtonColors(servicesManager), 100);
       return;
     }
+
+    if (BRUSH_TOOL_NAMES.includes(toolName)) {
+      // Eraser clears panel selection; brush restores the last label
+      const effectiveLabelId = toolName === ERASER_TOOL_NAME ? ERASER_LABEL.id : activeLabelId;
+      const viewportId = getActiveViewportContext(servicesManager)?.activeViewportId;
+      window?.dispatchEvent?.(
+        new CustomEvent(OVI_ACTIVE_LABEL_EVENT, { detail: { labelId: effectiveLabelId, sourceToolName: toolName, _isFromTool: true } })
+      );
+      ensureBrushToolReady(servicesManager, activeLabelId, toolName, viewportId).then(() => {
+        // Retry invalidating the cursor color after setup completes,
+        // in case _hoverData was already set from a mouse move.
+        segmentationUtils?.invalidateBrushCursor?.(TOOL_GROUP_ID);
+      });
+      isManualContourActive = false;
+      removeManualContourHints();
+      showManualContourLabelMenu({
+        uiDialogService,
+        servicesManager,
+        sourceToolName: toolName,
+      });
+      setTimeout(() => syncToolbarButtonColors(servicesManager), 100);
+      return;
+    }
+
+    if (toolName === 'MaskContour') {
+      // Sync panel to show mask card as active
+      window?.dispatchEvent?.(
+        new CustomEvent(OVI_ACTIVE_LABEL_EVENT, { detail: { labelId: 'mask', sourceToolName: 'MaskContour', _isFromTool: true } })
+      );
+    }
+
+    hideBrushCursorOverlay();
+    restoreViewportCursor();
+    uiDialogService.hide('manual-contour-label');
+    setTimeout(() => syncToolbarButtonColors(servicesManager), 100);
 
     if (isManualContourActive) {
       isManualContourActive = false;
@@ -513,56 +1361,62 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     }
 
     applyAnnotationStyle(newAnnotation.annotationUID, labelId);
+  };
 
-    const frameOfReferenceUID = newAnnotation.metadata?.FrameOfReferenceUID;
-    const annotationManager = annotation.state.getAnnotationManager();
-
-    if (!frameOfReferenceUID || !annotationManager) {
+  const logBrushPointerState = (
+    viewportElement: HTMLElement | null,
+    clientPoint?: { x: number; y: number },
+    pointerType?: string
+  ) => {
+    const toolGroupService = servicesManager?.services?.toolGroupService;
+    const { segmentationService } = servicesManager?.services || {};
+    const activeTool = toolGroupService?.getActivePrimaryMouseButtonTool?.(TOOL_GROUP_ID);
+    if (!BRUSH_TOOL_NAMES.includes(activeTool)) {
       return;
     }
 
-    const existingAnnotations =
-      annotationManager.getAnnotations(frameOfReferenceUID, TOOL_NAME) || [];
-    const currentImageId = newAnnotation.metadata?.referencedImageId;
-    const currentFrameNumber = newAnnotation.data?.frameNumber;
-    const currentModelType = newAnnotation.data?.modelType || 'manual';
-    const currentSeriesInstanceUID = newAnnotation.data?.seriesInstanceUID;
+    const activeContext = getActiveViewportContext(servicesManager);
+    const viewportId = activeContext?.activeViewportId;
+    const activeSegmentation = viewportId
+      ? segmentationService?.getActiveSegmentation?.(viewportId)
+      : null;
 
-    existingAnnotations.forEach(existingAnnotation => {
-      if (existingAnnotation.annotationUID === newAnnotation.annotationUID) {
-        return;
-      }
-
-      const existingModelType = existingAnnotation.data?.modelType || 'manual';
-      if (existingModelType !== currentModelType) {
-        return;
-      }
-
-      const existingSeriesInstanceUID = existingAnnotation.data?.seriesInstanceUID;
-      if (
-        currentSeriesInstanceUID &&
-        existingSeriesInstanceUID &&
-        existingSeriesInstanceUID !== currentSeriesInstanceUID
-      ) {
-        return;
-      }
-
-      const existingImageId = existingAnnotation.metadata?.referencedImageId;
-      const existingFrameNumber =
-        existingAnnotation.data?.frameNumber || existingAnnotation.metadata?.frameNumber;
-      const sameImageId = currentImageId && existingImageId && existingImageId === currentImageId;
-      const sameFrame =
-        !currentImageId &&
-        currentFrameNumber !== undefined &&
-        existingFrameNumber === currentFrameNumber;
-
-      if (
-        (sameImageId || sameFrame) &&
-        existingAnnotation.data?.labelId === newAnnotation.data?.labelId
-      ) {
-        annotation.state.removeAnnotation(existingAnnotation.annotationUID);
-      }
+    pushOviBrushDebug('brush pointer down', {
+      activeTool,
+      activeLabelId,
+      viewportId,
+      clientPoint,
+      pointerType,
+      elementPresent: Boolean(viewportElement),
+      activeSegmentation,
+      activeSegmentViewport: viewportId
+        ? segmentationService?.getActiveSegment?.(viewportId)
+        : null,
+      activeSegmentSegmentation: activeSegmentation?.segmentationId
+        ? segmentationService?.getActiveSegment?.(activeSegmentation.segmentationId)
+        : null,
     });
+  };
+
+  const onNativePointerDown = (evt: PointerEvent) => {
+    if (evt.pointerType !== 'mouse' && evt.pointerType !== 'pen') {
+      return;
+    }
+    currentBrushPointerType = evt.pointerType;
+
+    const viewportElement = getViewportElementAtPoint(evt.clientX, evt.clientY);
+    if (!viewportElement) {
+      return;
+    }
+
+    logBrushPointerState(
+      viewportElement,
+      {
+        x: evt.clientX,
+        y: evt.clientY,
+      },
+      evt.pointerType
+    );
   };
 
   const onAnnotationModified = evt => {
@@ -608,9 +1462,173 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     }
   };
 
+  const onAnnotationCompleted = evt => {
+    const completedAnnotation = evt.detail?.annotation;
+    if (completedAnnotation?.metadata?.toolName !== TOOL_NAME) {
+      return;
+    }
+
+    const referencedImageId = completedAnnotation.metadata?.referencedImageId;
+    const viewportContext = getActiveViewportContext(servicesManager);
+    const viewportId = viewportContext?.activeViewportId;
+    const segmentIndex = getOviSegmentIndexForLabelId(completedAnnotation.data?.labelId || activeLabelId);
+    const contourPoints =
+      completedAnnotation.data?.contour?.polyline || completedAnnotation.data?.handles?.points;
+
+    if (!referencedImageId || !contourPoints?.length) {
+      return;
+    }
+
+    void writeContourToActiveSegmentation({
+      servicesManager,
+      viewportId,
+      referencedImageId,
+      worldPolyline: contourPoints,
+      segmentIndex,
+    }).then(() => {
+      annotation.state.removeAnnotation(completedAnnotation.annotationUID);
+      queueCurrentFrameContourSync(viewportId, referencedImageId);
+    });
+  };
+
+  const onMouseMove = evt => {
+    const { element, currentPoints } = evt.detail || {};
+    const toolGroupService = servicesManager?.services?.toolGroupService;
+    const activeTool = toolGroupService?.getActivePrimaryMouseButtonTool?.(TOOL_GROUP_ID);
+
+    if (!BRUSH_TOOL_NAMES.includes(activeTool)) {
+      if (!shouldUseNativeBrushCursor() && element instanceof HTMLElement) {
+        element.style.removeProperty('cursor');
+      }
+      hideBrushCursorOverlay();
+      return;
+    }
+
+    if (!shouldUseNativeBrushCursor() && element instanceof HTMLElement) {
+      element.style.setProperty('cursor', 'none', 'important');
+    }
+
+    syncBrushCursorOverlay(element, currentPoints?.canvas);
+  };
+
+  const onPointerMove = (evt: PointerEvent) => {
+    const { pointerType } = evt;
+    if (pointerType !== 'pen' && pointerType !== 'mouse') {
+      return;
+    }
+    currentBrushPointerType = pointerType;
+
+    const toolGroupService = servicesManager?.services?.toolGroupService;
+    const activeTool = toolGroupService?.getActivePrimaryMouseButtonTool?.(TOOL_GROUP_ID);
+    if (!BRUSH_TOOL_NAMES.includes(activeTool)) {
+      hideBrushCursorOverlay();
+      return;
+    }
+
+    // Ensure CSS cursor is hidden on the viewport element for mouse pointer
+    if (!shouldUseNativeBrushCursor() && pointerType === 'mouse') {
+      const viewportEl = getViewportElementAtPoint(evt.clientX, evt.clientY);
+      if (viewportEl) {
+        viewportEl.style.setProperty('cursor', 'none', 'important');
+      }
+    }
+
+    syncBrushCursorOverlayAtClient(evt.clientX, evt.clientY);
+  };
+
+  const onPointerLeave = (evt: PointerEvent) => {
+    if (evt.pointerType !== 'pen') {
+      return;
+    }
+
+    currentBrushPointerType = null;
+
+    hideBrushCursorOverlay();
+  };
+
+  const onPenUp = (evt: PointerEvent) => {
+    if (evt.pointerType !== 'pen') {
+      return;
+    }
+
+    currentBrushPointerType = null;
+
+    hideBrushCursorOverlay();
+  };
+
+  const onCameraModified = (evt: any) => {
+    const element = evt.detail?.element;
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+
+    const newScale = computeCanvasPxPerMm(element);
+    if (newScale !== null && newScale !== currentCanvasPxPerMm) {
+      currentCanvasPxPerMm = newScale;
+      window?.dispatchEvent?.(
+        new CustomEvent(OVI_CANVAS_SCALE_EVENT, { detail: { canvasPxPerMm: newScale } })
+      );
+    }
+  };
+
+  // Eagerly create the segmentation when new images are loaded into the viewport,
+  // so the brush tool is ready before the user interacts with it.
+  const onViewportNewImageSet = () => {
+    void ensureOviSegmentationForViewport(servicesManager);
+  };
+
   eventTarget.addEventListener(Enums.Events.TOOL_ACTIVATED, onToolActivated);
   eventTarget.addEventListener(Enums.Events.ANNOTATION_ADDED, onAnnotationAdded);
   eventTarget.addEventListener(Enums.Events.ANNOTATION_MODIFIED, onAnnotationModified);
+  eventTarget.addEventListener(Enums.Events.ANNOTATION_COMPLETED, onAnnotationCompleted);
+  eventTarget.addEventListener(Enums.Events.MOUSE_MOVE, onMouseMove);
+  eventTarget.addEventListener(CoreEnums.Events.CAMERA_MODIFIED, onCameraModified);
+  eventTarget.addEventListener(CoreEnums.Events.VIEWPORT_NEW_IMAGE_SET, onViewportNewImageSet);
+  window?.addEventListener?.('pointerdown', onNativePointerDown);
+  window?.addEventListener?.('pointermove', onPointerMove);
+  window?.addEventListener?.('pointerleave', onPointerLeave);
+  window?.addEventListener?.('pointercancel', onPointerLeave);
+  window?.addEventListener?.('pointerup', onPenUp);
+
+  const segmentationSubscription = segmentationService.subscribe(
+    segmentationService.EVENTS.SEGMENTATION_DATA_MODIFIED,
+    ({ segmentationId }) => {
+      const activeContext = getActiveViewportContext(servicesManager);
+      const activeViewportId = activeContext?.activeViewportId;
+      const activeSegmentation = activeViewportId
+        ? segmentationService.getActiveSegmentation(activeViewportId)
+        : null;
+      const referencedImageId = activeContext?.viewport?.getCurrentImageId?.();
+
+      if (!activeViewportId || !activeSegmentation?.segmentationId) {
+        return;
+      }
+
+      if (activeSegmentation.segmentationId !== segmentationId) {
+        return;
+      }
+
+      queueCurrentFrameContourSync(activeViewportId, referencedImageId);
+
+      const existingTimeout = saveTimeoutBySegmentationId.get(segmentationId);
+      if (existingTimeout !== undefined) {
+        window.clearTimeout(existingTimeout);
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        saveTimeoutBySegmentationId.delete(segmentationId);
+        void persistManualSegmentation(segmentationId);
+      }, 500);
+      saveTimeoutBySegmentationId.set(segmentationId, timeoutId);
+    }
+  );
+
+  const segmentationAddedSubscription = segmentationService.subscribe(
+    segmentationService.EVENTS.SEGMENTATION_ADDED,
+    ({ segmentationId }) => {
+      void restoreManualSegmentation(segmentationId);
+    }
+  );
 
   const onKeyDown = (evt: KeyboardEvent) => {
     if (!isManualContourActive && !isManualContourToolActive(servicesManager)) {
@@ -752,13 +1770,78 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     evt.preventDefault();
   };
 
+  const onPencilDoubleTap = () => {
+    const nextLabel = isEraserLabelId(activeLabelId) ? lastNonEraserLabelId : ERASER_LABEL.id;
+    void updateActiveLabel(nextLabel, servicesManager, BRUSH_TOOL_NAME);
+    showGestureHud(
+      isEraserLabelId(nextLabel)
+        ? 'Pencil double-tap detected: Eraser'
+        : `Pencil double-tap detected: ${getLabelConfig(nextLabel).label}`
+    );
+  };
+
+  const onExternalActiveLabelChange = (evt: Event) => {
+    const detail = (evt as CustomEvent)?.detail || {};
+    if (!detail.labelId) {
+      return;
+    }
+
+    // Skip events dispatched by the tool itself — prevents echo loop
+    if (detail._isFromTool) {
+      return;
+    }
+
+    // Panel mask card clicked → activate MaskContour tool
+    if (detail.labelId === 'mask') {
+      setPrimaryTool(servicesManager, 'MaskContour');
+      return;
+    }
+
+    // Use the sourceToolName from the panel — it already checks the active tool
+    // (brush stays brush, contour stays contour, mask→contour switches to contour)
+    const sourceToolName = detail.sourceToolName || TOOL_NAME;
+    void updateActiveLabel(detail.labelId, servicesManager, sourceToolName);
+  };
+
   window?.addEventListener?.('keydown', onKeyDown);
+  window?.addEventListener?.('medex-pencil-doubletap', onPencilDoubleTap as EventListener);
+  window?.addEventListener?.(OVI_ACTIVE_LABEL_EVENT, onExternalActiveLabelChange as EventListener);
 
   return () => {
     eventTarget.removeEventListener(Enums.Events.TOOL_ACTIVATED, onToolActivated);
     eventTarget.removeEventListener(Enums.Events.ANNOTATION_ADDED, onAnnotationAdded);
     eventTarget.removeEventListener(Enums.Events.ANNOTATION_MODIFIED, onAnnotationModified);
+    eventTarget.removeEventListener(Enums.Events.ANNOTATION_COMPLETED, onAnnotationCompleted);
+    eventTarget.removeEventListener(Enums.Events.MOUSE_MOVE, onMouseMove);
+    eventTarget.removeEventListener(CoreEnums.Events.CAMERA_MODIFIED, onCameraModified);
+    eventTarget.removeEventListener(CoreEnums.Events.VIEWPORT_NEW_IMAGE_SET, onViewportNewImageSet);
+    window?.removeEventListener?.('pointerdown', onNativePointerDown);
+    window?.removeEventListener?.('pointermove', onPointerMove);
+    window?.removeEventListener?.('pointerleave', onPointerLeave);
+    window?.removeEventListener?.('pointercancel', onPointerLeave);
+    window?.removeEventListener?.('pointerup', onPenUp);
     window?.removeEventListener?.('keydown', onKeyDown);
+    window?.removeEventListener?.('medex-pencil-doubletap', onPencilDoubleTap as EventListener);
+    window?.removeEventListener?.(
+      OVI_ACTIVE_LABEL_EVENT,
+      onExternalActiveLabelChange as EventListener
+    );
+    segmentationSubscription.unsubscribe();
+    segmentationAddedSubscription.unsubscribe();
+    if (syncTimeoutId !== null) {
+      window.clearTimeout(syncTimeoutId);
+      syncTimeoutId = null;
+    }
+    saveTimeoutBySegmentationId.forEach(timeoutId => window.clearTimeout(timeoutId));
+    saveTimeoutBySegmentationId.clear();
+    restoredSegmentationKeys.clear();
+    currentCanvasPxPerMm = null;
     removeManualContourHints();
+    hideBrushCursorOverlay();
+    restoreViewportCursor();
+    brushCursorOverlay?.remove();
+    brushCursorOverlay = null;
+    gestureHudOverlay?.remove();
+    gestureHudOverlay = null;
   };
 }

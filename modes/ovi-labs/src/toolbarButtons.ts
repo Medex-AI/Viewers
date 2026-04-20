@@ -145,6 +145,26 @@ const toolbarButtons: Button[] = [
     },
   },
   {
+    id: 'Brush',
+    uiType: 'ohif.toolButton',
+    props: {
+      icon: 'icon-tool-brush',
+      label: 'Brush',
+      tooltip: 'Brush segmentation tool',
+      commands: {
+        ...setToolActiveToolbar,
+        commandOptions: {
+          ...setToolActiveToolbar.commandOptions,
+          toolName: 'CircularBrush',
+        },
+      },
+      evaluate: {
+        name: 'evaluate.cornerstoneTool',
+        toolNames: ['CircularBrush', 'CircularEraser'],
+      },
+    },
+  },
+  {
     id: 'MaskContour',
     uiType: 'ohif.toolButton',
     props: {

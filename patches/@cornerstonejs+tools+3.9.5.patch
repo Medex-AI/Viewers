@@ -1,8 +1,8 @@
 diff --git a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
-index 20295f6..ffed554 100644
+index 13acf80..1c73df2 100644
 --- a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
 +++ b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
-@@ -24,6 +24,15 @@ const disable = function (element) {
+@@ -26,6 +26,15 @@ const disable = function (element) {
      element.removeEventListener(Enums.Events.STACK_NEW_IMAGE, _imageChangeEventListener);
      element.removeEventListener(Enums.Events.IMAGE_RENDERED, _imageChangeEventListener);
  };
@@ -19,31 +19,16 @@ index 20295f6..ffed554 100644
  function _imageChangeEventListener(evt) {
      const eventData = evt.detail;
 @@ -36,7 +45,7 @@ function _imageChangeEventListener(evt) {
+         return;
+     }
      const labelmapRepresentations = representations.filter((representation) => representation.type === SegmentationRepresentations.Labelmap);
+-    const actors = viewport.getActors();
++    const actors = normalizeActors(viewport.getActors());
      labelmapRepresentations.forEach((representation) => {
          const { segmentationId } = representation;
          updateLabelmapSegmentationImageReferences(viewportId, segmentationId);
-     });
--    const actors = viewport.getActors();
-+    const actors = normalizeActors(viewport.getActors());
-     const labelmapActors = labelmapRepresentations
-         .flatMap((representation) => {
-         return getLabelmapActorEntries(viewportId, representation.segmentationId);
-diff --git a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
-index abc1234..def5678 100644
---- a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
-+++ b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
-@@ -107,6 +107,9 @@ function addListMethod(name, createInitialized) {
-         brushStrategy[name] ||= createInitialized
-             ? (enabledElement, operationData, ...args) => {
-                 const initializedData = brushStrategy[createInitialized](enabledElement, operationData, name);
-+                if (!initializedData) {
-+                    return;
-+                }
-                 let returnValue;
-                 brushStrategy[listName].forEach((func) => {
 diff --git a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
-index 9219c3b..e8f560d 100644
+index 90f0f01..e8f560d 100644
 --- a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
 +++ b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
 @@ -1,5 +1,14 @@
@@ -70,7 +55,7 @@ index 9219c3b..e8f560d 100644
      const filteredActors = actors.filter(filterFn);
      return filteredActors.length > 0 ? filteredActors[0] : undefined;
  }
-@@ -20,7 +29,7 @@ function getActorEntries(viewportId, filterFn) {
+@@ -22,7 +31,7 @@ function getActorEntries(viewportId, filterFn) {
      if (!renderingEngine || !viewport) {
          return;
      }
@@ -79,3 +64,30 @@ index 9219c3b..e8f560d 100644
      const filteredActors = actors.filter(filterFn);
      return filteredActors.length > 0 ? filteredActors : undefined;
  }
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
+index ae270a9..9a20608 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/tools/segmentation/strategies/BrushStrategy.js
+@@ -107,6 +107,9 @@ function addListMethod(name, createInitialized) {
+         brushStrategy[name] ||= createInitialized
+             ? (enabledElement, operationData, ...args) => {
+                 const initializedData = brushStrategy[createInitialized](enabledElement, operationData, name);
++                if (!initializedData) {
++                    return;
++                }
+                 let returnValue;
+                 brushStrategy[listName].forEach((func) => {
+                     const value = func.call(brushStrategy, initializedData, ...args);
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/utilities/segmentation/utilsForWorker.js b/node_modules/@cornerstonejs/tools/dist/esm/utilities/segmentation/utilsForWorker.js
+index 89df785..8c1e071 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/utilities/segmentation/utilsForWorker.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/utilities/segmentation/utilsForWorker.js
+@@ -121,7 +121,7 @@ export const getImageReferenceInfo = (segVolumeId, segImageIds) => {
+     const refImage = cache.getImage(refImageId);
+     const scalingModule = metaData.get('scalingModule', refImageId);
+     const modalityUnitOptions = {
+-        isPreScaled: Boolean(refImage.preScale?.scaled),
++        isPreScaled: Boolean(refImage?.preScale?.scaled),
+         isSuvScaled: typeof scalingModule?.suvbw === 'number',
+     };
+     return { refImageId, modalityUnitOptions };

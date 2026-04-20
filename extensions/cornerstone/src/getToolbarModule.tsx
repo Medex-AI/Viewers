@@ -237,7 +237,8 @@ function _evaluateToggle({
     return getDisabledState(disabledText);
   }
 
-  const isOff = offModes.includes(toolGroup.getToolOptions(toolName).mode);
+  const toolOptions = toolGroup.getToolOptions(toolName);
+  const isOff = !toolOptions || offModes.includes(toolOptions.mode);
 
   return {
     className: utils.getToggledClassName(!isOff),

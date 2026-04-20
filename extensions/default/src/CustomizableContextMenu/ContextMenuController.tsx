@@ -3,6 +3,11 @@ import { CommandsManager } from '@ohif/core';
 import { annotation as CsAnnotation } from '@cornerstonejs/tools';
 import { Menu, MenuItem, Point, ContextMenuProps } from './types';
 
+const TABLET_CONTEXT_MENU_OFFSET_X = 28;
+const TABLET_CONTEXT_MENU_OFFSET_Y = 44;
+const isTouchCapableDevice = () =>
+  typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
 /**
  * The context menu controller is a helper class that knows how
  * to manage context menus based on the UI Customization Service.
@@ -208,6 +213,13 @@ export default class ContextMenuController {
         positionIterator.return();
       }
       current = positionIterator.next();
+    }
+
+    if (ContextMenuController._isValidPosition(position) && isTouchCapableDevice()) {
+      return {
+        x: position.x + TABLET_CONTEXT_MENU_OFFSET_X,
+        y: position.y - TABLET_CONTEXT_MENU_OFFSET_Y,
+      };
     }
 
     return position;

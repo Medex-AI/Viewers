@@ -1,5 +1,25 @@
 /** @type {AppTypes.Config} */
 
+const getRuntimeProductName = () => {
+  if (typeof window === 'undefined') {
+    return 'MedEx Studio';
+  }
+
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isIPadLike =
+    /iPad/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const coarsePointer =
+    window.matchMedia?.('(pointer: coarse)')?.matches ||
+    window.matchMedia?.('(any-pointer: coarse)')?.matches ||
+    false;
+  const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+  const isTabletViewport = shortSide >= 768;
+  const isTabletLike = hasTouch && (isIPadLike || coarsePointer || isTabletViewport);
+
+  return isTabletLike ? 'MedEx Draw' : 'MedEx Studio';
+};
+
 window.config = {
   name: 'config/default.js',
   routerBasename: null,
@@ -18,6 +38,9 @@ window.config = {
   strictZSpacingForVolumeViewport: true,
   groupEnabledModesFirst: true,
   allowMultiSelectExport: false,
+  investigationalUseDialog: {
+    option: 'never',
+  },
   maxNumRequests: {
     interaction: 100,
     thumbnail: 75,
@@ -41,10 +64,10 @@ window.config = {
           className: 'h-8 w-auto dark-theme-logo',
           alt: 'MedEx',
         }),
-        // MedEx Viewer Text
+        // Runtime product label
         React.createElement('span', {
           className: 'ml-2 text-xl font-semibold text-orange-500',
-        }, 'MedEx Viewer')
+        }, getRuntimeProductName())
       );
     },
   },
@@ -289,6 +312,8 @@ window.config = {
         omitQuotationForMultipartRequest: true,
         bulkDataURI: {
           enabled: true,
+          startsWith: 'http://localhost:8042/',
+          prefixWith: '/',
           // This is an example config that can be used to fix the retrieve URL
           // where it has the wrong prefix (eg a canned prefix).  It is better to
           // just use the correct prefix out of the box, but that is sometimes hard

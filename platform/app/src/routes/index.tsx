@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route, Link } from 'react-router-dom';
+import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from '@ohif/ui-next';
 
 // Route Components
@@ -54,12 +54,55 @@ NotFoundStudy.propTypes = {
   message: PropTypes.string,
 };
 
+const AppLanding = () => {
+  if (authService.isAuthenticated()) {
+    return (
+      <Navigate
+        to="/medex-app"
+        replace
+      />
+    );
+  }
+
+  return <LoginPage redirectTo="/medex-app" />;
+};
+
+const LegacyAppRedirect = () => (
+  <Navigate
+    to="/medex-app"
+    replace
+  />
+);
+
+const MedexAppNestedRedirect = () => {
+  const location = useLocation();
+  const rewrittenPath = location.pathname.replace(/^\/medex-app/, '') || '/medex-app';
+
+  return (
+    <Navigate
+      to={`${rewrittenPath}${location.search || ''}${location.hash || ''}`}
+      replace
+    />
+  );
+};
+
 // TODO: Include "routes" debug route if dev build
 const bakedInRoutes = [
+  {
+    path: `/`,
+    children: AppLanding,
+    private: false,
+  },
   {
     path: `/login`,
     children: LoginPage,
     private: false, // Public route - no authentication required
+    props: { redirectTo: '/medex-app' },
+  },
+  {
+    path: `/app`,
+    children: LegacyAppRedirect,
+    private: false,
   },
   {
     path: `/notfoundserver`,
@@ -115,15 +158,7 @@ const createRoutes = ({
   console.log('Registering worklist route', routerBasename, path);
 
   const WorkListRoute = {
-    path: '/app',
-    children: DataSourceWrapper,
-    private: true,
-    props: { children: WorkList, servicesManager, extensionManager },
-  };
-
-  // Root route to serve WorkList at '/' (authenticated)
-  const RootWorkListRoute = {
-    path: '/',
+    path: '/medex-app',
     children: DataSourceWrapper,
     private: true,
     props: { children: WorkList, servicesManager, extensionManager },
@@ -133,7 +168,12 @@ const createRoutes = ({
 
   const allRoutes = [
     ...routes,
-    ...(showStudyList ? [WorkListRoute, RootWorkListRoute] : [RootWorkListRoute]),
+    {
+      path: '/medex-app/*',
+      children: MedexAppNestedRedirect,
+      private: true,
+    },
+    ...(showStudyList ? [WorkListRoute] : []),
     ...(customRoutes?.routes || []),
     ...bakedInRoutes,
     customRoutes?.notFoundRoute || notFoundRoute,

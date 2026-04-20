@@ -8,7 +8,7 @@ import { defaultActionIcons } from './constants';
 import MoreDropdownMenu from '../../Components/MoreDropdownMenu';
 import { CallbackCustomization } from 'platform/core/src/types';
 
-const { sortStudyInstances, formatDate, createStudyBrowserTabs } = utils;
+const { formatDate, createStudyBrowserTabs } = utils;
 
 const thumbnailNoImageModalities = [
   'SR',
@@ -53,7 +53,6 @@ function PanelStudyBrowser({
   const [displaySetsLoadingState, setDisplaySetsLoadingState] = useState({});
   const [thumbnailImageSrcMap, setThumbnailImageSrcMap] = useState({});
   const [jumpToDisplaySet, setJumpToDisplaySet] = useState(null);
-
   const [viewPresets, setViewPresets] = useState(
     customizationService.getCustomization('studyBrowser.viewPresets')
   );
@@ -113,12 +112,19 @@ function PanelStudyBrowser({
 
   // ~~ studyDisplayList
   useEffect(() => {
+    let cancelled = false;
+    const studiesThisRun = new Map();
+
     // Fetch all studies for the patient in each primary study
     async function fetchStudiesForPatient(StudyInstanceUID) {
       // current study qido
       const qidoForStudyUID = await dataSource.query.studies.search({
         studyInstanceUid: StudyInstanceUID,
       });
+
+      if (cancelled) {
+        return;
+      }
 
       if (!qidoForStudyUID?.length) {
         navigate('/notfoundstudy', '_self');
@@ -135,6 +141,10 @@ function PanelStudyBrowser({
         console.warn(error);
       }
 
+      if (cancelled) {
+        return;
+      }
+
       const mappedStudies = _mapDataSourceStudies(qidoStudiesForPatient);
       const actuallyMappedStudies = mappedStudies.map(qidoStudy => {
         return {
@@ -146,18 +156,18 @@ function PanelStudyBrowser({
         };
       });
 
-      setStudyDisplayList(prevArray => {
-        const ret = [...prevArray];
-        for (const study of actuallyMappedStudies) {
-          if (!prevArray.find(it => it.studyInstanceUid === study.studyInstanceUid)) {
-            ret.push(study);
-          }
-        }
-        return ret;
-      });
+      for (const study of actuallyMappedStudies) {
+        studiesThisRun.set(study.studyInstanceUid, study);
+      }
+      setStudyDisplayList([...studiesThisRun.values()]);
     }
 
+    setStudyDisplayList([]);
     StudyInstanceUIDs.forEach(sid => fetchStudiesForPatient(sid));
+
+    return () => {
+      cancelled = true;
+    };
   }, [StudyInstanceUIDs, dataSource, getStudiesForPatientByMRN, navigate]);
 
   // ~~ Initial Thumbnails
@@ -229,7 +239,7 @@ function PanelStudyBrowser({
     );
 
     if (!customMapDisplaySets) {
-      sortStudyInstances(mappedDisplaySets);
+      sortDisplaySetsByScanSequence(mappedDisplaySets);
     }
 
     setDisplaySets(mappedDisplaySets);
@@ -309,7 +319,7 @@ function PanelStudyBrowser({
         );
 
         if (!customMapDisplaySets) {
-          sortStudyInstances(mappedDisplaySets);
+          sortDisplaySetsByScanSequence(mappedDisplaySets);
         }
 
         setDisplaySets(mappedDisplaySets);
@@ -327,7 +337,7 @@ function PanelStudyBrowser({
         );
 
         if (!customMapDisplaySets) {
-          sortStudyInstances(mappedDisplaySets);
+          sortDisplaySetsByScanSequence(mappedDisplaySets);
         }
 
         setDisplaySets(mappedDisplaySets);
@@ -430,8 +440,8 @@ function PanelStudyBrowser({
           setActiveTabName(clickedTabName);
         }}
         onClickUntrack={onClickUntrack}
-        onClickThumbnail={() => {}}
-        onDoubleClickThumbnail={onDoubleClickThumbnailHandler}
+        onClickThumbnail={onDoubleClickThumbnailHandler}
+        onDoubleClickThumbnail={() => {}}
         activeDisplaySetInstanceUIDs={activeDisplaySetInstanceUIDs}
         showSettings={actionIcons.find(icon => icon.id === 'settings')?.value}
         viewPresets={viewPresets}
@@ -492,13 +502,17 @@ function _mapDisplaySets(displaySets, displaySetLoadingState, thumbnailImageSrcM
         displaySetInstanceUID,
         description: ds.SeriesDescription || '',
         seriesNumber: ds.SeriesNumber,
+        acquisitionNumber: ds.AcquisitionNumber,
+        instanceNumber: ds.InstanceNumber,
         modality: ds.Modality,
         seriesDate: formatDate(ds.SeriesDate),
+        seriesTime: ds.SeriesTime || '',
         numInstances: ds.numImageFrames,
         loadingProgress,
         countIcon: ds.countIcon,
         messages: ds.messages,
         StudyInstanceUID: ds.StudyInstanceUID,
+        SeriesInstanceUID: ds.SeriesInstanceUID,
         componentType,
         imageSrc: thumbnailSrc || thumbnailImageSrcMap[displaySetInstanceUID],
         dragData: {
@@ -511,6 +525,29 @@ function _mapDisplaySets(displaySets, displaySetLoadingState, thumbnailImageSrcM
     });
 
   return [...thumbnailDisplaySets, ...thumbnailNoImageDisplaySets];
+}
+
+function sortDisplaySetsByScanSequence(displaySets) {
+  const numericValue = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+  };
+
+  const textValue = value => (value == null ? '' : String(value));
+
+  displaySets.sort((a, b) => {
+    const comparisons = [
+      numericValue(a.seriesNumber) - numericValue(b.seriesNumber),
+      numericValue(a.acquisitionNumber) - numericValue(b.acquisitionNumber),
+      textValue(a.seriesDate).localeCompare(textValue(b.seriesDate)),
+      textValue(a.seriesTime).localeCompare(textValue(b.seriesTime)),
+      numericValue(a.instanceNumber) - numericValue(b.instanceNumber),
+      textValue(a.SeriesInstanceUID).localeCompare(textValue(b.SeriesInstanceUID)),
+      textValue(a.displaySetInstanceUID).localeCompare(textValue(b.displaySetInstanceUID)),
+    ];
+
+    return comparisons.find(result => result !== 0) || 0;
+  });
 }
 
 function _getComponentType(ds) {

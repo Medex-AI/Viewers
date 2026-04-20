@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useCine } from '@ohif/ui-next';
-import { Enums, eventTarget, cache } from '@cornerstonejs/core';
+import { Enums, eventTarget, cache, utilities as csUtils } from '@cornerstonejs/core';
 import { useAppConfig } from '@state';
 
 function WrappedCinePlayer({
@@ -133,6 +133,161 @@ function WrappedCinePlayer({
     };
   }, [cines, viewportId, cineService, enabledVPElement, cineHandler]);
 
+  const stepViewportFrame = useCallback(
+    (delta: number) => {
+      if (!delta) {
+        return;
+      }
+
+      const viewport = servicesManager.services.cornerstoneViewportService?.getCornerstoneViewport?.(
+        viewportId
+      );
+      const currentIndex = viewport?.getCurrentImageIdIndex?.();
+      const totalSlices = viewport?.getNumberOfSlices?.() || viewport?.getImageIds?.()?.length || 0;
+
+      if (!viewport?.element || !totalSlices) {
+        return;
+      }
+
+      const safeIndex = typeof currentIndex === 'number' ? currentIndex : 0;
+      const nextIndex = Math.max(0, Math.min(totalSlices - 1, safeIndex + delta));
+
+      if (nextIndex === safeIndex) {
+        return;
+      }
+
+      csUtils.jumpToSlice(viewport.element, {
+        imageIndex: nextIndex,
+        debounceLoading: true,
+      });
+      viewport.render?.();
+    },
+    [servicesManager.services.cornerstoneViewportService, viewportId]
+  );
+
+  const stepViewportTime = useCallback(
+    (delta: number) => {
+      if (!delta || !dynamicInfo?.volumeId || !dynamicInfo?.numDimensionGroups) {
+        return;
+      }
+
+      const nextTime = Math.max(
+        1,
+        Math.min(dynamicInfo.numDimensionGroups, (dynamicInfo.dimensionGroupNumber || 1) + delta)
+      );
+
+      if (nextTime === dynamicInfo.dimensionGroupNumber) {
+        return;
+      }
+
+      const volume = cache.getVolume(dynamicInfo.volumeId, true);
+      if (!volume) {
+        return;
+      }
+
+      volume.dimensionGroupNumber = nextTime;
+
+      const displaySet = servicesManager.services.displaySetService?.getDisplaySetByUID?.(
+        dynamicInfo.volumeId
+      );
+      if (displaySet?.dynamicVolumeInfo) {
+        displaySet.dynamicVolumeInfo.dimensionGroupNumber = nextTime;
+      }
+
+      setDynamicInfo(prev =>
+        prev
+          ? {
+              ...prev,
+              dimensionGroupNumber: nextTime,
+            }
+          : prev
+      );
+
+      servicesManager.services.cornerstoneViewportService
+        ?.getCornerstoneViewport?.(viewportId)
+        ?.render?.();
+    },
+    [
+      dynamicInfo,
+      servicesManager.services.cornerstoneViewportService,
+      servicesManager.services.displaySetService,
+      viewportId,
+    ]
+  );
+
+  useEffect(() => {
+    if (!isCineEnabled) {
+      return;
+    }
+
+    const handleKeyDown = (evt: KeyboardEvent) => {
+      if (evt.defaultPrevented || evt.altKey || evt.ctrlKey || evt.metaKey) {
+        return;
+      }
+
+      const target = evt.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      const isEditable =
+        target?.isContentEditable ||
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select';
+
+      if (isEditable) {
+        return;
+      }
+
+      if (evt.key === 'ArrowLeft') {
+        console.log('[cine-player][keydown] ArrowLeft -> stepViewportTime(-1)', {
+          viewportId,
+          isCineEnabled,
+          dynamicInfo,
+        });
+        evt.preventDefault();
+        stepViewportTime(-1);
+        return;
+      }
+
+      if (evt.key === 'ArrowRight') {
+        console.log('[cine-player][keydown] ArrowRight -> stepViewportTime(1)', {
+          viewportId,
+          isCineEnabled,
+          dynamicInfo,
+        });
+        evt.preventDefault();
+        stepViewportTime(1);
+        return;
+      }
+
+      if (evt.key === 'ArrowUp') {
+        console.log('[cine-player][keydown] ArrowUp -> stepViewportFrame(-1)', {
+          viewportId,
+          isCineEnabled,
+          dynamicInfo,
+        });
+        evt.preventDefault();
+        stepViewportFrame(-1);
+        return;
+      }
+
+      if (evt.key === 'ArrowDown') {
+        console.log('[cine-player][keydown] ArrowDown -> stepViewportFrame(1)', {
+          viewportId,
+          isCineEnabled,
+          dynamicInfo,
+        });
+        evt.preventDefault();
+        stepViewportFrame(1);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isCineEnabled, stepViewportFrame, stepViewportTime]);
+
   if (!isCineEnabled) {
     return null;
   }
@@ -148,6 +303,10 @@ function WrappedCinePlayer({
       isPlaying={isPlaying}
       dynamicInfo={dynamicInfo}
       customizationService={customizationService}
+      onStepFrame={stepViewportFrame}
+      onStepTime={stepViewportTime}
+      cornerstoneViewportService={servicesManager.services.cornerstoneViewportService}
+      displaySetService={servicesManager.services.displaySetService}
     />
   );
 }
@@ -159,6 +318,10 @@ function RenderCinePlayer({
   isPlaying,
   dynamicInfo: dynamicInfoProp,
   customizationService,
+  onStepFrame,
+  onStepTime,
+  cornerstoneViewportService,
+  displaySetService,
 }) {
   const CinePlayerComponent = customizationService.getCustomization('cinePlayer');
 
@@ -207,10 +370,27 @@ function RenderCinePlayer({
   }, []);
 
   const updateDynamicInfo = useCallback(props => {
-    const { volumeId, dimensionGroupNumber } = props;
+    const { volumeId, dimensionGroupNumber, numDimensionGroups, label, splittingTag } = props;
     const volume = cache.getVolume(volumeId, true);
+    if (!volume) {
+      return;
+    }
+
     volume.dimensionGroupNumber = dimensionGroupNumber;
-  }, []);
+    const displaySet = displaySetService?.getDisplaySetByUID?.(volumeId);
+    if (displaySet?.dynamicVolumeInfo) {
+      displaySet.dynamicVolumeInfo.dimensionGroupNumber = dimensionGroupNumber;
+    }
+
+    setDynamicInfo(prev => ({
+      ...(prev || {}),
+      ...props,
+      label: label || splittingTag || prev?.label,
+      numDimensionGroups: numDimensionGroups || prev?.numDimensionGroups,
+    }));
+
+    cornerstoneViewportService?.getCornerstoneViewport?.(viewportId)?.render?.();
+  }, [cornerstoneViewportService, displaySetService, viewportId]);
 
   return (
     <CinePlayerComponent
@@ -238,6 +418,8 @@ function RenderCinePlayer({
           frameRate,
         })
       }
+      onStepFrame={onStepFrame}
+      onStepTime={onStepTime}
       dynamicInfo={dynamicInfo}
       updateDynamicInfo={updateDynamicInfo}
     />

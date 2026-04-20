@@ -41,7 +41,28 @@ function ToolSettings({ options }) {
   );
 }
 
+const runOptionChange = (option, value) => {
+  if (typeof option.onChange === 'function') {
+    option.onChange(value);
+    return;
+  }
+
+  if (typeof option.commands === 'function') {
+    option.commands(value);
+  }
+};
+
 const renderRangeSetting = option => {
+  const step = Number(option.step) || 1;
+  const min = Number(option.min);
+  const max = Number(option.max);
+  const value = Number(option.value);
+
+  const adjustValue = delta => {
+    const nextValue = Math.min(max, Math.max(min, value + delta));
+    runOptionChange(option, nextValue);
+  };
+
   return (
     <div
       className="flex items-center"
@@ -49,16 +70,39 @@ const renderRangeSetting = option => {
     >
       <div className="w-1/3 text-[13px]">{option.name}</div>
       <div className="w-2/3">
-        <InputRange
-          minValue={option.min}
-          maxValue={option.max}
-          step={option.step}
-          value={option.value}
-          onChange={value => option.commands?.(value)}
-          allowNumberEdit={true}
-          showAdjustmentArrows={false}
-          inputClassName="ml-1 w-4/5 cursor-pointer"
-        />
+        <div className="flex items-center gap-2">
+          {option.showInlineAdjustmentButtons && (
+            <button
+              type="button"
+              className="border-secondary-light text-primary-active hover:bg-primary-light hover:text-black h-7 w-7 rounded border text-base leading-none"
+              onClick={() => adjustValue(-step)}
+              aria-label={`Decrease ${option.name}`}
+            >
+              -
+            </button>
+          )}
+          <InputRange
+            minValue={option.min}
+            maxValue={option.max}
+            step={option.step}
+            value={option.value}
+            onChange={value => runOptionChange(option, value)}
+            allowNumberEdit={true}
+            showAdjustmentArrows={true}
+            containerClassName="flex-1"
+            inputClassName="ml-1 w-full cursor-pointer"
+          />
+          {option.showInlineAdjustmentButtons && (
+            <button
+              type="button"
+              className="border-secondary-light text-primary-active hover:bg-primary-light hover:text-black h-7 w-7 rounded border text-base leading-none"
+              onClick={() => adjustValue(step)}
+              aria-label={`Increase ${option.name}`}
+            >
+              +
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -104,7 +148,7 @@ const renderDoubleRangeSetting = option => {
     >
       <InputDoubleRange
         values={option.value}
-        onChange={option.commands}
+        onChange={value => runOptionChange(option, value)}
         minValue={option.min}
         maxValue={option.max}
         step={option.step}

@@ -7,6 +7,7 @@ import measurementsCustomization from './customizations/measurementsCustomizatio
 import volumeRenderingCustomization from './customizations/volumeRenderingCustomization';
 import colorbarCustomization from './customizations/colorbarCustomization';
 import windowLevelPresetsCustomization from './customizations/windowLevelPresetsCustomization';
+import hotkeyBindingsCustomization from './customizations/hotkeyBindingsCustomization';
 import miscCustomization from './customizations/miscCustomization';
 import captureViewportModalCustomization from './customizations/captureViewportModalCustomization';
 import viewportDownloadWarningCustomization from './customizations/viewportDownloadWarningCustomization';
@@ -26,6 +27,7 @@ function getCustomizationModule({ commandsManager, servicesManager }) {
         ...volumeRenderingCustomization,
         ...colorbarCustomization,
         ...windowLevelPresetsCustomization,
+        ...hotkeyBindingsCustomization,
         ...miscCustomization,
         ...captureViewportModalCustomization,
         ...viewportDownloadWarningCustomization,

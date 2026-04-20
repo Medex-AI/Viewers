@@ -37,6 +37,9 @@ function createTools(utilityModule) {
         toolName: toolNames.RegionSegmentPlus,
       },
       {
+        toolName: toolNames.ManualContour,
+      },
+      {
         toolName: 'CircularEraser',
         parentTool: 'Brush',
         configuration: {

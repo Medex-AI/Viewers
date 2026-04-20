@@ -6,6 +6,10 @@ let servicesManager: any = null;
 
 // Initialize the integration between our authService and OHIF's UserAuthenticationService
 export const initializeAuthServiceIntegration = (services?: any) => {
+  // Set the auth service reference for the UserAuthenticationService first so
+  // protected-route checks can see persisted JWT state during initial render.
+  setAuthServiceReference(authService);
+
   // Store services manager reference
   if (services) {
     servicesManager = services;
@@ -21,9 +25,6 @@ export const initializeAuthServiceIntegration = (services?: any) => {
       services.services.userAuthenticationService.setUser(currentUser);
     }
   }
-  
-  // Set the auth service reference for the UserAuthenticationService
-  setAuthServiceReference(authService);
   
   console.log('Auth service integration initialized');
 };

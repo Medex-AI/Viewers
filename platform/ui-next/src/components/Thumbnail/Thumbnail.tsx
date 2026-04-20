@@ -1,10 +1,19 @@
-import React, { useState } from 'react';
+import React, { useRef } from 'react';
 import PropTypes from 'prop-types';
 import classnames from 'classnames';
 import { useDrag } from 'react-dnd';
 import { Icons } from '../Icons';
 import { DisplaySetMessageListTooltip } from '../DisplaySetMessageListTooltip';
 import { TooltipTrigger, TooltipContent, Tooltip } from '../Tooltip';
+
+const INTERACTIVE_CHILD_SELECTOR =
+  'button, a, input, select, textarea, [role="menuitem"], [data-thumbnail-action]';
+const THUMBNAIL_WIDTH_CLASS = 'w-[169px]';
+const THUMBNAIL_HEIGHT_CLASS = 'h-[212px]';
+const THUMBNAIL_IMAGE_WIDTH_CLASS = 'w-[160px]';
+const THUMBNAIL_IMAGE_HEIGHT_CLASS = 'h-[143px]';
+const THUMBNAIL_META_WIDTH_CLASS = 'w-[160px]';
+const THUMBNAIL_META_HEIGHT_CLASS = 'h-[65px]';
 
 /**
  * Display a thumbnail for a display set.
@@ -34,6 +43,10 @@ const Thumbnail = ({
   onClickUntrack = () => {},
   ThumbnailMenuItems = () => {},
 }: withAppTypes): React.ReactNode => {
+  const TOUCH_TAP_MAX_MOVEMENT_PX = 10;
+  const TOUCH_TAP_MAX_DURATION_MS = 300;
+  const isTouchCapableDevice =
+    typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
   // TODO: We should wrap our thumbnail to create a "DraggableThumbnail", as
   // this will still allow for "drag", even if there is no drop target for the
   // specified item.
@@ -45,17 +58,84 @@ const Thumbnail = ({
     },
   });
 
-  const [lastTap, setLastTap] = useState(0);
+  const touchInteractionRef = useRef({
+    startX: 0,
+    startY: 0,
+    startTime: 0,
+    didScroll: false,
+  });
+  const ignoreClickUntilRef = useRef(0);
+
+  const handleTouchStart = e => {
+    if (e.target instanceof Element && e.target.closest(INTERACTIVE_CHILD_SELECTOR)) {
+      return;
+    }
+
+    const touch = e.changedTouches?.[0];
+    if (!touch) {
+      return;
+    }
+
+    touchInteractionRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startTime: Date.now(),
+      didScroll: false,
+    };
+  };
+
+  const handleTouchMove = e => {
+    if (e.target instanceof Element && e.target.closest(INTERACTIVE_CHILD_SELECTOR)) {
+      return;
+    }
+
+    const touch = e.changedTouches?.[0];
+    if (!touch) {
+      return;
+    }
+
+    const deltaX = touch.clientX - touchInteractionRef.current.startX;
+    const deltaY = touch.clientY - touchInteractionRef.current.startY;
+    const movement = Math.hypot(deltaX, deltaY);
+
+    if (movement > TOUCH_TAP_MAX_MOVEMENT_PX) {
+      touchInteractionRef.current.didScroll = true;
+    }
+  };
 
   const handleTouchEnd = e => {
-    const currentTime = new Date().getTime();
-    const tapLength = currentTime - lastTap;
-    if (tapLength < 300 && tapLength > 0) {
-      onDoubleClick(e);
-    } else {
+    if (e.target instanceof Element && e.target.closest(INTERACTIVE_CHILD_SELECTOR)) {
+      return;
+    }
+
+    ignoreClickUntilRef.current = Date.now() + 350;
+
+    const touch = e.changedTouches?.[0];
+    if (!touch) {
+      return;
+    }
+
+    const { startX, startY, startTime, didScroll } = touchInteractionRef.current;
+    const deltaX = touch.clientX - startX;
+    const deltaY = touch.clientY - startY;
+    const movement = Math.hypot(deltaX, deltaY);
+    const duration = Date.now() - startTime;
+
+    if (!didScroll && movement <= TOUCH_TAP_MAX_MOVEMENT_PX && duration <= TOUCH_TAP_MAX_DURATION_MS) {
       onClick(e);
     }
-    setLastTap(currentTime);
+  };
+
+  const handleClick = e => {
+    if (e.target instanceof Element && e.target.closest(INTERACTIVE_CHILD_SELECTOR)) {
+      return;
+    }
+
+    if (Date.now() < ignoreClickUntilRef.current) {
+      return;
+    }
+
+    onClick(e);
   };
 
   const renderThumbnailPreset = () => {
@@ -66,17 +146,27 @@ const Thumbnail = ({
           isActive && 'bg-popover rounded'
         )}
       >
-        <div className="h-[114px] w-[128px]">
+        <div className={classnames(THUMBNAIL_IMAGE_HEIGHT_CLASS, THUMBNAIL_IMAGE_WIDTH_CLASS)}>
           <div className="relative">
             {imageSrc ? (
               <img
                 src={imageSrc}
                 alt={imageAltText}
-                className="h-[114px] w-[128px] rounded"
+                className={classnames(
+                  THUMBNAIL_IMAGE_HEIGHT_CLASS,
+                  THUMBNAIL_IMAGE_WIDTH_CLASS,
+                  'rounded'
+                )}
                 crossOrigin="anonymous"
               />
             ) : (
-              <div className="bg-background h-[114px] w-[128px] rounded"></div>
+              <div
+                className={classnames(
+                  'bg-background rounded',
+                  THUMBNAIL_IMAGE_HEIGHT_CLASS,
+                  THUMBNAIL_IMAGE_WIDTH_CLASS
+                )}
+              ></div>
             )}
 
             {/* bottom left */}
@@ -135,23 +225,34 @@ const Thumbnail = ({
             </div>
           </div>
         </div>
-        <div className="flex h-[52px] w-[128px] flex-col justify-start pt-px">
+        <div
+          className={classnames(
+            'flex flex-col justify-start pt-px',
+            THUMBNAIL_META_HEIGHT_CLASS,
+            THUMBNAIL_META_WIDTH_CLASS
+          )}
+        >
           <Tooltip>
             <TooltipContent>{description}</TooltipContent>
             <TooltipTrigger>
-              <div className="min-h-[18px] w-[128px] overflow-hidden text-ellipsis whitespace-nowrap pb-0.5 pl-1 text-left text-[12px] font-normal leading-4 text-white">
+              <div
+                className={classnames(
+                  'min-h-[20px] overflow-hidden text-ellipsis whitespace-nowrap pb-0.5 pl-1 text-left text-[13px] font-normal leading-4 text-white',
+                  THUMBNAIL_META_WIDTH_CLASS
+                )}
+              >
                 {description}
               </div>
             </TooltipTrigger>
           </Tooltip>
-          <div className="flex h-[12px] items-center gap-[7px] overflow-hidden">
-            <div className="text-muted-foreground pl-1 text-[11px]"> S:{seriesNumber}</div>
-            <div className="text-muted-foreground text-[11px]">
+          <div className="flex h-[14px] items-center gap-[7px] overflow-hidden">
+            <div className="text-muted-foreground pl-1 text-[12px]"> S:{seriesNumber}</div>
+            <div className="text-muted-foreground text-[12px]">
               <div className="flex items-center gap-[4px]">
                 {countIcon ? (
-                  React.createElement(Icons[countIcon] || Icons.MissingIcon, { className: 'w-3' })
+                  React.createElement(Icons[countIcon] || Icons.MissingIcon, { className: 'w-3.5' })
                 ) : (
-                  <Icons.InfoSeries className="w-3" />
+                  <Icons.InfoSeries className="w-3.5" />
                 )}
                 <div>{numInstances}</div>
               </div>
@@ -253,8 +354,9 @@ const Thumbnail = ({
     <div
       className={classnames(
         className,
-        'bg-muted hover:bg-primary/30 group flex cursor-pointer select-none flex-col rounded outline-none',
-        viewPreset === 'thumbnails' && 'h-[170px] w-[135px]',
+        'bg-muted group flex cursor-pointer select-none flex-col rounded outline-none',
+        !isTouchCapableDevice && 'hover:bg-primary/30',
+        viewPreset === 'thumbnails' && `${THUMBNAIL_HEIGHT_CLASS} ${THUMBNAIL_WIDTH_CLASS}`,
         viewPreset === 'list' && 'h-[40px] w-full'
       )}
       id={`thumbnail-${displaySetInstanceUID}`}
@@ -264,8 +366,10 @@ const Thumbnail = ({
           : 'study-browser-thumbnail'
       }
       data-series={seriesNumber}
-      onClick={onClick}
+      onClick={handleClick}
       onDoubleClick={onDoubleClick}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
       role="button"
     >

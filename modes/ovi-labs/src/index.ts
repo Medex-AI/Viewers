@@ -4,12 +4,19 @@ import initToolGroups from './initToolGroups';
 import { isSuitableForOviLabs } from './utils/seriesValidator';
 import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleROIBehavior';
 import setupManualContourBehavior, {
+  getActiveManualContourLabelId,
+  setActiveManualContourLabelId,
   showManualContourLabelMenu,
 } from './utils/setupManualContourBehavior';
 import setupMaskContourBehavior from './utils/setupMaskContourBehavior';
 import setupManipulationToolsCursor from './utils/setupManipulationToolsCursor';
 import viewportClickCommandsCustomization from './customizations/viewportClickCommandsCustomization';
+import { ensureOviSegmentationForViewport } from '../../../extensions/ovi-labs/src/utils/oviSegmentation';
 import './styles.css';
+import { annotation } from '@cornerstonejs/tools';
+import { getEnabledElement } from '@cornerstonejs/core';
+
+const DEFAULT_BRUSH_SIZE_MM = 3;
 
 const ohif = {
   layout: '@ohif/extension-default.layoutTemplateModule.viewerLayout',
@@ -39,6 +46,99 @@ const extensionDependencies = {
 
 const OVI_LABS_COMMANDS_CONTEXT = 'OVI_LABS';
 const MANUAL_CONTOUR_TOOL_NAME = 'ManualContour';
+const MASK_CONTOUR_TOOL_NAME = 'MaskContour';
+const CONTOUR_CONTEXT_PICK_PROXIMITY_PX = 10;
+const setContourMenuDebug = (message: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  (window as Window & { __oviContourDebugInfo?: string }).__oviContourDebugInfo = message;
+};
+
+function pointInPolygon(point, polygon) {
+  let isInside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+
+    const intersects =
+      yi > point[1] !== yj > point[1] &&
+      point[0] < ((xj - xi) * (point[1] - yi)) / ((yj - yi) || Number.EPSILON) + xi;
+
+    if (intersects) {
+      isInside = !isInside;
+    }
+  }
+
+  return isInside;
+}
+
+function distanceToSegment(point, start, end) {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(point[0] - start[0], point[1] - start[1]);
+  }
+
+  const t = Math.max(
+    0,
+    Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / (dx * dx + dy * dy))
+  );
+
+  const projection = [start[0] + t * dx, start[1] + t * dy];
+  return Math.hypot(point[0] - projection[0], point[1] - projection[1]);
+}
+
+function isPointNearContourEdge(point, polygon, isClosed = true) {
+  const edgeCount = isClosed ? polygon.length : polygon.length - 1;
+
+  for (let i = 0; i < edgeCount; i++) {
+    const start = polygon[i];
+    const end = polygon[(i + 1) % polygon.length];
+    if (distanceToSegment(point, start, end) <= CONTOUR_CONTEXT_PICK_PROXIMITY_PX) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function findNearbyContourAnnotation(element, canvasCoordinates) {
+  const enabledElement = getEnabledElement(element);
+  const viewport = enabledElement?.viewport;
+  if (!viewport || !canvasCoordinates) {
+    return null;
+  }
+
+  const toolNames = [MANUAL_CONTOUR_TOOL_NAME, MASK_CONTOUR_TOOL_NAME];
+
+  for (const toolName of toolNames) {
+    const annotations = annotation.state.getAnnotations(toolName, element) || [];
+    for (const contour of annotations) {
+      const polyline = contour?.data?.contour?.polyline || [];
+      if (!polyline.length || contour?.isLocked || contour?.isVisible === false) {
+        continue;
+      }
+
+      const canvasPoints = polyline.map(point => viewport.worldToCanvas(point));
+      const isClosed = contour?.data?.contour?.closed !== false;
+      if (
+        canvasPoints.length >= 3 &&
+        (pointInPolygon(canvasCoordinates, canvasPoints) ||
+          isPointNearContourEdge(canvasCoordinates, canvasPoints, isClosed))
+      ) {
+        return contour;
+      }
+    }
+  }
+
+  return null;
+}
 
 function registerOviLabsCommands(commandsManager, servicesManager) {
   commandsManager.createContext(OVI_LABS_COMMANDS_CONTEXT);
@@ -56,6 +156,66 @@ function registerOviLabsCommands(commandsManager, servicesManager) {
       const { uiDialogService } = servicesManager.services;
       const element = event?.detail?.element;
       showManualContourLabelMenu({ uiDialogService, annotation: nearbyToolData, element });
+    },
+  });
+
+  commandsManager.registerCommand(OVI_LABS_COMMANDS_CONTEXT, 'showOviLabsContextMenu', {
+    commandFn: ({ nearbyToolData, event }) => {
+      const element = event?.detail?.element;
+      const canvasCoordinates = event?.detail?.currentPoints?.canvas;
+      const contourNearbyToolData =
+        nearbyToolData?.metadata?.toolName === MANUAL_CONTOUR_TOOL_NAME ||
+        nearbyToolData?.metadata?.toolName === MASK_CONTOUR_TOOL_NAME
+          ? nearbyToolData
+          : findNearbyContourAnnotation(element, canvasCoordinates);
+      const fallbackNearbyToolData = commandsManager.runCommand(
+        'getNearbyToolData',
+        {
+          element,
+          canvasCoordinates,
+        },
+        'CORNERSTONE'
+      );
+      const resolvedNearbyToolData = nearbyToolData || contourNearbyToolData || fallbackNearbyToolData;
+
+      setContourMenuDebug(
+        `contextMenu point=${canvasCoordinates?.map(value => Math.round(value)).join(',') || 'none'} direct=${nearbyToolData?.metadata?.toolName || 'none'} contour=${contourNearbyToolData?.metadata?.toolName || 'none'} fallback=${fallbackNearbyToolData?.metadata?.toolName || 'none'} final=${resolvedNearbyToolData?.metadata?.toolName || 'none'}`
+      );
+
+      if (!resolvedNearbyToolData) {
+        return;
+      }
+
+      const toolName = resolvedNearbyToolData?.metadata?.toolName;
+      const menuCustomizationId =
+        toolName === MANUAL_CONTOUR_TOOL_NAME || toolName === MASK_CONTOUR_TOOL_NAME
+          ? 'contourContextMenu'
+          : 'measurementsContextMenu';
+      setContourMenuDebug(
+        `contextMenu final=${toolName || 'none'} menu=${menuCustomizationId}`
+      );
+      commandsManager.runCommand(
+        'showContextMenu',
+        {
+          menuCustomizationId,
+          element,
+          event,
+          selectorProps: {
+            nearbyToolData: resolvedNearbyToolData,
+            toolName,
+            value: resolvedNearbyToolData,
+            uid: resolvedNearbyToolData?.annotationUID,
+          },
+        },
+        'DEFAULT'
+      );
+    },
+  });
+
+  commandsManager.registerCommand(OVI_LABS_COMMANDS_CONTEXT, 'activateOviBrushTool', {
+    commandFn: async () => {
+      const labelId = getActiveManualContourLabelId();
+      await setActiveManualContourLabelId(labelId, servicesManager, 'CircularBrush');
     },
   });
 }
@@ -169,21 +329,26 @@ function modeFactory({ modeConfiguration }) {
       teardownManualContourBehavior = setupManualContourBehavior(servicesManager);
       teardownMaskContourBehavior = setupMaskContourBehavior(servicesManager);
       teardownManipulationToolsCursor = setupManipulationToolsCursor();
+      commandsManager.runCommand('setBrushSize', {
+        value: DEFAULT_BRUSH_SIZE_MM,
+        toolNames: ['CircularBrush', 'CircularEraser'],
+      });
 
       toolbarService.addButtons(toolbarButtons);
-      toolbarService.createButtonSection('primary', [
-        'DebugProbe',
-        'measurementSection',
-        'Zoom',
-        'WindowLevel',
+  toolbarService.createButtonSection('primary', [
+    'DebugProbe',
+    'measurementSection',
+    'Zoom',
+    'WindowLevel',
         'Pan',
         'Layout',
-        'MoreTools',
-        'Cine',
-        'RotatableRectangleROI',
-        'ManualContour',
-        'MaskContour',
-      ]);
+    'MoreTools',
+    'Cine',
+    'RotatableRectangleROI',
+    'ManualContour',
+    'Brush',
+    'MaskContour',
+  ]);
       toolbarService.createButtonSection('measurementSection', [
         'Length',
         'Bidirectional',
@@ -200,7 +365,14 @@ function modeFactory({ modeConfiguration }) {
         'CalibrationLine',
       ]);
 
+      try {
+        toolGroupService.setToolActive('default', 'WindowLevel', { mouseButton: 1 });
+      } catch (error) {
+        console.warn('Failed to pre-activate WindowLevel in OVI Labs mode:', error);
+      }
+
       setSeriesFromQuery({ servicesManager, commandsManager });
+      void ensureOviSegmentationForViewport(servicesManager);
     },
     onModeExit: ({ servicesManager }: withAppTypes) => {
       const { toolGroupService, uiDialogService, uiModalService } = servicesManager.services;
@@ -252,6 +424,9 @@ function modeFactory({ modeConfiguration }) {
                 {
                   namespace: cornerstone.viewport,
                   displaySetsToDisplay: [ohif.sopClassHandler],
+                  viewportOptions: {
+                    viewportType: 'stack',
+                  },
                 },
               ],
             },

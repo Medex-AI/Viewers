@@ -22,6 +22,45 @@ interface AuthService {
   clearToken(): void;
 }
 
+const SESSION_EXPIRED_FLAG = 'auth_session_expired';
+
+const markSessionExpired = (): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(SESSION_EXPIRED_FLAG, 'true');
+  } catch (error) {
+    console.error('Failed to persist session-expired flag:', error);
+  }
+};
+
+const clearSessionExpiredFlag = (): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+  } catch (error) {
+    console.error('Failed to clear session-expired flag:', error);
+  }
+};
+
+export const hasSessionExpiredNotice = (): boolean => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  try {
+    return window.sessionStorage.getItem(SESSION_EXPIRED_FLAG) === 'true';
+  } catch (error) {
+    console.error('Failed to read session-expired flag:', error);
+    return false;
+  }
+};
+
 class AuthServiceImpl implements AuthService {
   private baseUrl: string;
   private currentUser: User | null = null;
@@ -31,8 +70,7 @@ class AuthServiceImpl implements AuthService {
   constructor() {
     // Handle environment variable safely for browser environment
     this.baseUrl =
-      (typeof process !== 'undefined' && process.env?.REACT_APP_AUTH_API_URL) ||
-      '/api/auth';
+      (typeof process !== 'undefined' && process.env?.REACT_APP_AUTH_API_URL) || '/api/auth';
     // Initialize from localStorage on startup
     this.initializeFromStorage();
     // Start monitoring session expiration
@@ -50,6 +88,7 @@ class AuthServiceImpl implements AuthService {
         // Check if token is already expired on initialization
         if (this.isTokenExpired(storedToken)) {
           console.log('Stored token is expired, clearing session');
+          markSessionExpired();
           this.clearToken();
         }
       } catch (error) {
@@ -60,6 +99,10 @@ class AuthServiceImpl implements AuthService {
   }
 
   private startSessionMonitoring(): void {
+    if (this.sessionCheckInterval) {
+      return;
+    }
+
     // Check session every 60 seconds
     this.sessionCheckInterval = setInterval(() => {
       if (this.token && this.isTokenExpired(this.token)) {
@@ -78,12 +121,13 @@ class AuthServiceImpl implements AuthService {
 
   private handleSessionExpired(): void {
     // Clear the session
+    markSessionExpired();
     this.clearToken();
 
     // Redirect to login page
     if (typeof window !== 'undefined') {
       console.log('Session expired, redirecting to login page');
-      window.location.href = '/login?session_expired=true';
+      window.location.href = '/login?session_expired=true&redirect=%2Fmedex-app';
     }
   }
 
@@ -105,7 +149,7 @@ class AuthServiceImpl implements AuthService {
 
       // Backend returns 'token' not 'access_token'
       const token = data.access_token || data.token;
-      
+
       if (response.ok && token) {
         const user: User = {
           id: data.user?.id || username,
@@ -115,7 +159,9 @@ class AuthServiceImpl implements AuthService {
 
         this.setToken(token);
         this.currentUser = user;
-        
+        this.startSessionMonitoring();
+        clearSessionExpiredFlag();
+
         // Store in localStorage for persistence
         localStorage.setItem('auth_user', JSON.stringify(user));
 
@@ -146,7 +192,7 @@ class AuthServiceImpl implements AuthService {
         await fetch(`${this.baseUrl}/logout`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${this.token}`,
+            Authorization: `Bearer ${this.token}`,
             'Content-Type': 'application/json',
           },
           credentials: 'include',
@@ -169,7 +215,7 @@ class AuthServiceImpl implements AuthService {
       const response = await fetch(`${this.baseUrl}/refresh`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.token}`,
+          Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json',
         },
         credentials: 'include',
@@ -185,6 +231,7 @@ class AuthServiceImpl implements AuthService {
       }
     } catch (error) {
       console.error('Token refresh error:', error);
+      markSessionExpired();
       this.clearToken();
       throw error;
     }

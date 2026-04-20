@@ -18,14 +18,17 @@ function WrappedPanelStudyBrowser() {
   // TODO: This should be made available a different way; route should have
   // already determined our datasource
   const [dataSource] = extensionManager.getActiveDataSource();
-  const _getStudiesForPatientByMRN = getStudiesForPatientByMRN.bind(null, dataSource);
+  const _getStudiesForPatientByMRN = useCallback(
+    qidoForStudyUID => getStudiesForPatientByMRN(dataSource, qidoForStudyUID),
+    [dataSource]
+  );
   const _getImageSrcFromImageId = useCallback(
     _createGetImageSrcFromImageIdFn(extensionManager),
     []
   );
-  const _requestDisplaySetCreationForStudy = requestDisplaySetCreationForStudy.bind(
-    null,
-    dataSource
+  const _requestDisplaySetCreationForStudy = useCallback(
+    (...args) => requestDisplaySetCreationForStudy(dataSource, ...args),
+    [dataSource]
   );
 
   return (

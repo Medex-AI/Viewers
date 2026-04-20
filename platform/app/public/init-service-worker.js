@@ -18,8 +18,9 @@ if ('function' === typeof importScripts) {
 
   var supportsServiceWorker = 'serviceWorker' in navigator;
   var isNotLocalDevelopment = ['localhost', '127'].indexOf(location.hostname) === -1;
+  var isDuckDnsDemoHost = /\.duckdns\.org$/i.test(location.hostname);
 
-  if (supportsServiceWorker && isNotLocalDevelopment) {
+  if (supportsServiceWorker && isNotLocalDevelopment && !isDuckDnsDemoHost) {
     const swFileLocation = (window.PUBLIC_URL || '/') + 'sw.js';
     const wb = new Workbox(swFileLocation);
 

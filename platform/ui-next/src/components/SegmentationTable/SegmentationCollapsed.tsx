@@ -30,14 +30,19 @@ const SegmentationCollapsedHeader = ({ children }: { children: React.ReactNode }
 const SegmentationCollapsedDropdownMenu = ({ children }: { children: React.ReactNode }) => {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-        >
-          <Icons.More className="h-6 w-6" />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+            >
+              <Icons.More className="h-6 w-6" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Segmentation options</TooltipContent>
+      </Tooltip>
       {children}
     </DropdownMenu>
   );

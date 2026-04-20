@@ -66,7 +66,11 @@ export default async function init({
   });
 
   // For debugging e2e tests that are failing on CI
-  cornerstone.setUseCPURendering(Boolean(appConfig.useCPURendering));
+  // Only override CPU rendering if explicitly configured; otherwise keep Cornerstone's
+  // auto-detected setting (e.g. it already sets useCPURendering=true when no WebGL is found)
+  if (appConfig.useCPURendering !== undefined) {
+    cornerstone.setUseCPURendering(Boolean(appConfig.useCPURendering));
+  }
 
   cornerstone.setConfiguration({
     ...cornerstone.getConfiguration(),
@@ -89,7 +93,6 @@ export default async function init({
   const {
     userAuthenticationService,
     customizationService,
-    uiModalService,
     uiNotificationService,
     cornerstoneViewportService,
     hangingProtocolService,
@@ -103,7 +106,7 @@ export default async function init({
   window.commandsManager = commandsManager;
 
   if (appConfig.showCPUFallbackMessage && cornerstone.getShouldUseCPURendering()) {
-    _showCPURenderingModal(uiModalService, hangingProtocolService);
+    _showCPURenderingToast(uiNotificationService);
   }
   const { getPresentationId: getLutPresentationId } = useLutPresentationStore.getState();
 
@@ -127,6 +130,16 @@ export default async function init({
     { type: SegmentationRepresentations.Contour },
     {
       renderFill: false,
+    }
+  );
+
+  // The local vtk.js patch for labelmap outlines currently breaks volume labelmap
+  // shader compilation, so keep labelmaps fill-only until that shader path is fixed.
+  cornerstoneTools.segmentation.config.style.setStyle(
+    { type: SegmentationRepresentations.Labelmap },
+    {
+      fillAlpha: 0.2,
+      renderOutline: false,
     }
   );
 
@@ -365,38 +378,12 @@ const createMetadataWrappedStrategy = (strategyFn: (args: any) => any) => {
   };
 };
 
-function CPUModal() {
-  return (
-    <div>
-      <p>
-        Your computer does not have enough GPU power to support the default GPU rendering mode. OHIF
-        has switched to CPU rendering mode. Please note that CPU rendering does not support all
-        features such as Volume Rendering, Multiplanar Reconstruction, and Segmentation Overlays.
-      </p>
-    </div>
-  );
-}
-
-function _showCPURenderingModal(uiModalService, hangingProtocolService) {
-  const callback = progress => {
-    if (progress === 100) {
-      uiModalService.show({
-        content: CPUModal,
-        title: 'OHIF Fell Back to CPU Rendering',
-      });
-
-      return true;
-    }
-  };
-
-  const { unsubscribe } = hangingProtocolService.subscribe(
-    hangingProtocolService.EVENTS.PROTOCOL_CHANGED,
-    () => {
-      const done = callback(100);
-
-      if (done) {
-        unsubscribe();
-      }
-    }
-  );
+function _showCPURenderingToast(uiNotificationService) {
+  uiNotificationService.show({
+    title: 'CPU Rendering Mode',
+    message:
+      'GPU rendering is unavailable. Volume Rendering, MPR, and Segmentation Overlays are not supported in this mode.',
+    type: 'warning',
+    duration: 8000,
+  });
 }

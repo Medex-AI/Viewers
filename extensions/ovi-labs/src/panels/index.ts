@@ -4,3 +4,4 @@ export { default as KymographsPanel } from './KymographsPanel';
 export { default as AnalysisPlotsPanel } from './AnalysisPlotsPanel';
 export { default as AnalysisContainerPanel } from './AnalysisContainerPanel';
 export { default as SegmentationPanel } from './SegmentationPanel';
+export { default as SegmentationExportPanel } from './SegmentationExportPanel';

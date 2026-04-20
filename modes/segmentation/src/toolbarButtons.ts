@@ -282,7 +282,8 @@ const toolbarButtons: Button[] = [
           min: 0.5,
           max: 99.5,
           step: 0.5,
-          value: 25,
+          value: 3,
+          showInlineAdjustmentButtons: true,
           commands: {
             commandName: 'setBrushSize',
             commandOptions: { toolNames: ['CircularBrush', 'SphereBrush'] },
@@ -346,6 +347,21 @@ const toolbarButtons: Button[] = [
       evaluate: {
         name: 'evaluate.cornerstone.segmentation',
         toolNames: ['RegionSegmentPlus'],
+        disabledText: 'Create new segmentation to enable this tool.',
+      },
+      commands: 'setToolActiveToolbar',
+    },
+  },
+  {
+    id: 'ManualContour',
+    uiType: 'ohif.toolBoxButton',
+    props: {
+      icon: 'tool-freehand-line-thin',
+      label: 'Manual Contour',
+      tooltip: 'Draw a closed contour and rasterize it into the active segment',
+      evaluate: {
+        name: 'evaluate.cornerstone.segmentation',
+        toolNames: ['ManualContour'],
         disabledText: 'Create new segmentation to enable this tool.',
       },
       commands: 'setToolActiveToolbar',
@@ -443,7 +459,8 @@ const toolbarButtons: Button[] = [
           min: 0.5,
           max: 99.5,
           step: 0.5,
-          value: 25,
+          value: 3,
+          showInlineAdjustmentButtons: true,
           commands: {
             commandName: 'setBrushSize',
             commandOptions: { toolNames: ['CircularEraser', 'SphereEraser'] },
@@ -486,7 +503,8 @@ const toolbarButtons: Button[] = [
           min: 0.5,
           max: 99.5,
           step: 0.5,
-          value: 25,
+          value: 3,
+          showInlineAdjustmentButtons: true,
           commands: {
             commandName: 'setBrushSize',
             commandOptions: {

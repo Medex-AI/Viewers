@@ -2,3 +2,4 @@ export { default as SegmentationModelSelector } from './SegmentationModelSelecto
 export { default as SegmentationLabelsList } from './SegmentationLabelsList';
 export { default as SegmentationExportControls } from './SegmentationExportControls';
 export { default as SegmentationThumbnail } from './SegmentationThumbnail';
+export { default as SegmentationConfigModal } from './SegmentationConfigModal';

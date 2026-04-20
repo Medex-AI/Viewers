@@ -1,4 +1,5 @@
 import {
+  cache,
   getEnabledElement,
   StackViewport,
   VolumeViewport,
@@ -36,6 +37,7 @@ import CornerstoneViewportDownloadForm from './utils/CornerstoneViewportDownload
 import { updateSegmentBidirectionalStats } from './utils/updateSegmentationStats';
 import { generateSegmentationCSVReport } from './utils/generateSegmentationCSVReport';
 import { getUpdatedViewportsForSegmentation } from './utils/hydrationUtils';
+import DeleteSegmentModal from './components/DeleteSegmentModal';
 
 const { DefaultHistoryMemo } = csUtils.HistoryMemo;
 const toggleSyncFunctions = {
@@ -470,11 +472,47 @@ function commandsModule({
       }
     },
 
-    removeMeasurement: ({ uid }) => {
-      if (Array.isArray(uid)) {
-        measurementService.removeMany(uid);
+    removeMeasurement: ({ uid, nearbyToolData, value, element }) => {
+      const resolvedUID = uid ?? nearbyToolData?.annotationUID ?? value?.annotationUID;
+
+      if (nearbyToolData?.annotationUID && annotation.state.getAnnotation(nearbyToolData.annotationUID)) {
+        annotation.state.removeAnnotation(nearbyToolData.annotationUID);
+        if (element) {
+          cstUtils.triggerAnnotationRender(element);
+        }
+        return;
+      }
+
+      if (Array.isArray(resolvedUID)) {
+        const annotationOnlyUIDs: string[] = [];
+        resolvedUID.forEach(currentUID => {
+          const measurement = measurementService.getMeasurement(currentUID);
+          if (measurement) {
+            measurementService.remove(currentUID);
+          } else if (annotation.state.getAnnotation(currentUID)) {
+            annotationOnlyUIDs.push(currentUID);
+          }
+        });
+
+        annotationOnlyUIDs.forEach(annotationUID => {
+          annotation.state.removeAnnotation(annotationUID);
+        });
+        if (annotationOnlyUIDs.length && element) {
+          cstUtils.triggerAnnotationRender(element);
+        }
       } else {
-        measurementService.remove(uid);
+        const measurement = resolvedUID ? measurementService.getMeasurement(resolvedUID) : null;
+        if (measurement) {
+          measurementService.remove(resolvedUID);
+          return;
+        }
+
+        if (resolvedUID && annotation.state.getAnnotation(resolvedUID)) {
+          annotation.state.removeAnnotation(resolvedUID);
+          if (element) {
+            cstUtils.triggerAnnotationRender(element);
+          }
+        }
       }
     },
 
@@ -986,6 +1024,45 @@ function commandsModule({
         (currentIndex + direction + viewportIds.length) % viewportIds.length;
       viewportGridService.setActiveViewportId(viewportIds[nextViewportIndex] as string);
     },
+    stepDynamicViewportTime: ({ direction = 1, viewportId } = {}) => {
+      if (!direction) {
+        return;
+      }
+
+      const { activeViewportId, viewports } = viewportGridService.getState();
+      const targetViewportId = viewportId || activeViewportId;
+      if (!targetViewportId) {
+        return;
+      }
+
+      const displaySetInstanceUIDs = viewports.get(targetViewportId)?.displaySetInstanceUIDs || [];
+      const dynamicDisplaySet = displaySetInstanceUIDs
+        .map(displaySetService.getDisplaySetByUID)
+        .find(displaySet => displaySet?.isDynamicVolume);
+
+      if (!dynamicDisplaySet?.dynamicVolumeInfo?.timePoints?.length) {
+        return;
+      }
+
+      const volumeId = dynamicDisplaySet.displaySetInstanceUID;
+      const totalTimes = dynamicDisplaySet.dynamicVolumeInfo.timePoints.length;
+      const volume = cache.getVolume(volumeId, true) as { dimensionGroupNumber?: number } | undefined;
+
+      const currentTime =
+        volume?.dimensionGroupNumber || dynamicDisplaySet.dynamicVolumeInfo.dimensionGroupNumber || 1;
+      const nextTime = Math.max(1, Math.min(totalTimes, currentTime + direction));
+
+      if (nextTime === currentTime) {
+        return;
+      }
+
+      if (volume) {
+        volume.dimensionGroupNumber = nextTime;
+      }
+
+      dynamicDisplaySet.dynamicVolumeInfo.dimensionGroupNumber = nextTime;
+      cornerstoneViewportService.getCornerstoneViewport(targetViewportId)?.render?.();
+    },
     /**
      * If the syncId is given and a synchronizer with that ID already exists, it will
      * toggle it on/off for the provided viewports. If not, it will attempt to create
@@ -1376,8 +1453,27 @@ function commandsModule({
      * @param props.segmentIndex - The index of the segment to delete
      */
     deleteSegmentCommand: ({ segmentationId, segmentIndex }) => {
-      const { segmentationService } = servicesManager.services;
-      segmentationService.removeSegment(segmentationId, segmentIndex);
+      const { segmentationService, uiModalService } = servicesManager.services;
+      const segmentation = segmentationService.getSegmentation(segmentationId);
+      const segmentLabel = segmentation?.segments?.[segmentIndex]?.label;
+
+      const onConfirm = () => {
+        segmentationService.removeSegment(segmentationId, segmentIndex);
+      };
+
+      if (uiModalService) {
+        uiModalService.show({
+          title: 'Delete Label',
+          content: DeleteSegmentModal,
+          contentProps: {
+            onConfirm,
+            segmentLabel,
+          },
+        });
+        return;
+      }
+
+      onConfirm();
     },
 
     /**
@@ -1830,6 +1926,14 @@ function commandsModule({
     },
     decrementActiveViewport: {
       commandFn: actions.changeActiveViewport,
+      options: { direction: -1 },
+    },
+    nextTimeFrame: {
+      commandFn: actions.stepDynamicViewportTime,
+      options: { direction: 1 },
+    },
+    previousTimeFrame: {
+      commandFn: actions.stepDynamicViewportTime,
       options: { direction: -1 },
     },
     flipViewportHorizontal: {

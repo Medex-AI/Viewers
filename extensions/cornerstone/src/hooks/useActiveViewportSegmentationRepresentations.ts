@@ -104,8 +104,13 @@ export function useActiveViewportSegmentationRepresentations({
   subscribeToDataModified = false,
   debounceTime = 0,
 }: withAppTypes<{ debounceTime?: number }>): ViewportSegmentationRepresentation {
-  const { segmentationService, viewportGridService, customizationService, displaySetService } =
-    servicesManager.services;
+  const {
+    segmentationService,
+    viewportGridService,
+    cornerstoneViewportService,
+    customizationService,
+    displaySetService,
+  } = servicesManager.services;
 
   const [segmentationsWithRepresentations, setSegmentationsWithRepresentations] =
     useState<ViewportSegmentationRepresentation>({
@@ -119,12 +124,20 @@ export function useActiveViewportSegmentationRepresentations({
       const displaySetUIDs = viewportGridService.getDisplaySetsUIDsForViewport(viewportId);
 
       if (!displaySetUIDs?.length) {
+        setSegmentationsWithRepresentations({
+          segmentationsWithRepresentations: [],
+          disabled: false,
+        });
         return;
       }
 
       const displaySet = displaySetService.getDisplaySetByUID(displaySetUIDs[0]);
 
       if (!displaySet) {
+        setSegmentationsWithRepresentations({
+          segmentationsWithRepresentations: [],
+          disabled: false,
+        });
         return;
       }
 
@@ -186,6 +199,14 @@ export function useActiveViewportSegmentationRepresentations({
         debouncedUpdate
       ),
       viewportGridService.subscribe(viewportGridService.EVENTS.GRID_STATE_CHANGED, debouncedUpdate),
+      cornerstoneViewportService.subscribe(
+        cornerstoneViewportService.EVENTS.VIEWPORT_DATA_CHANGED,
+        debouncedUpdate
+      ),
+      cornerstoneViewportService.subscribe(
+        cornerstoneViewportService.EVENTS.VIEWPORT_VOLUMES_CHANGED,
+        debouncedUpdate
+      ),
     ];
 
     if (subscribeToDataModified) {
@@ -206,6 +227,7 @@ export function useActiveViewportSegmentationRepresentations({
   }, [
     segmentationService,
     viewportGridService,
+    cornerstoneViewportService,
     customizationService,
     displaySetService,
     debounceTime,

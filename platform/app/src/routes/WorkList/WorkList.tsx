@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import classnames from 'classnames';
 import PropTypes from 'prop-types';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import moment from 'moment';
 import qs from 'query-string';
 import isEqual from 'lodash.isequal';
@@ -68,6 +68,7 @@ function WorkList({
   // ~ Filters
   const searchParams = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const STUDIES_LIMIT = 101;
   const queryFilterValues = _getQueryFilterValues(searchParams);
   const [sessionQueryFilterValues, updateSessionQueryFilterValues] = useSessionStorage({
@@ -97,6 +98,23 @@ function WorkList({
   const defaultSortValues =
     shouldUseDefaultSort && canSort ? { sortBy: 'studyDate', sortDirection: 'ascending' } : {};
   const { customizationService } = servicesManager.services;
+  const dataSourceConfig = dataSource.getConfig?.() || {};
+  const deleteSupportOverride = dataSourceConfig.supportsStudyDelete;
+  const orthancDetectionSource = [
+    dataSourceConfig.name,
+    dataSourceConfig.friendlyName,
+    dataSourceConfig.qidoRoot,
+    dataSourceConfig.wadoRoot,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const canDeleteStudies =
+    typeof deleteSupportOverride === 'boolean'
+      ? deleteSupportOverride
+      : orthancDetectionSource.includes('orthanc');
+  const deleteDisabledReason =
+    'Delete is disabled because this PACS does not expose study deletion through standard DICOMweb.';
 
   const sortedStudies = useMemo(() => {
     if (!canSort) {
@@ -129,9 +147,9 @@ function WorkList({
   }, [canSort, studies, shouldUseDefaultSort, sortBy, sortModifier]);
 
   // ~ Rows & Studies
-  const [expandedRows, setExpandedRows] = useState([]);
+  const [expandedRows, setExpandedRows] = useState<string[]>([]);
   const [studiesWithSeriesData, setStudiesWithSeriesData] = useState([]);
-  const numOfStudies = studiesTotal;
+  const [deletedUids, setDeletedUids] = useState<Set<string>>(new Set());
   const querying = useMemo(() => {
     return isLoadingData || expandedRows.length > 0;
   }, [isLoadingData, expandedRows]);
@@ -208,11 +226,11 @@ function WorkList({
       skipEmptyString: true,
     });
     navigate({
-      pathname: '/',
+      pathname: location.pathname || '/medex-app',
       search: search ? `?${search}` : undefined,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedFilterValues]);
+  }, [debouncedFilterValues, location.pathname]);
 
   // Query for series information
   useEffect(() => {
@@ -227,12 +245,8 @@ function WorkList({
       }
     };
 
-    // TODO: WHY WOULD YOU USE AN INDEX OF 1?!
-    // Note: expanded rows index begins at 1
     for (let z = 0; z < expandedRows.length; z++) {
-      const expandedRowIndex = expandedRows[z] - 1;
-      const studyInstanceUid = sortedStudies[expandedRowIndex].studyInstanceUid;
-
+      const studyInstanceUid = expandedRows[z];
       if (studiesWithSeriesData.includes(studyInstanceUid)) {
         continue;
       }
@@ -247,13 +261,75 @@ function WorkList({
     return !isEqual(filterValues, defaultFilterValues);
   };
 
+  const doDeleteStudy = async (studyInstanceUid: string) => {
+    // Optimistic: hide immediately
+    setDeletedUids(prev => new Set(prev).add(studyInstanceUid));
+    // Use the app's same-origin proxy for native Orthanc REST calls.
+    const orthancBase = '/orthanc-api';
+    try {
+      const lookupResp = await fetch(`${orthancBase}/tools/lookup`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: studyInstanceUid,
+      });
+      if (!lookupResp.ok) throw new Error(`Lookup failed: ${lookupResp.status}`);
+      const matches = await lookupResp.json();
+      const study = (matches as any[]).find(m => m.Type === 'Study');
+      if (!study) throw new Error('Study not found in Orthanc');
+      const deleteResp = await fetch(`${orthancBase}${study.Path}`, { method: 'DELETE' });
+      if (!deleteResp.ok && deleteResp.status !== 404) {
+        throw new Error(`Delete failed: ${deleteResp.status}`);
+      }
+    } catch (e) {
+      // Rollback optimistic hide
+      setDeletedUids(prev => { const s = new Set(prev); s.delete(studyInstanceUid); return s; });
+      console.error('Delete study error:', e);
+    }
+  };
+
+  const handleDeleteStudy = (studyInstanceUid: string, label: string) => {
+    show({
+      title: 'Delete Study',
+      content: () => (
+        <div className="flex flex-col gap-4 p-1">
+          <p className="text-white">
+            Delete study for <strong>{label}</strong>?
+          </p>
+          <p className="text-red-400 text-sm">This action cannot be undone.</p>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              type={ButtonEnums.type.secondary}
+              size={ButtonEnums.size.medium}
+              onClick={() => hide()}
+            >
+              Cancel
+            </Button>
+            <Button
+              type={ButtonEnums.type.primary}
+              size={ButtonEnums.size.medium}
+              className="!bg-red-600 hover:!bg-red-700"
+              onClick={() => {
+                hide();
+                doDeleteStudy(studyInstanceUid);
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
+      ),
+    });
+  };
+
   const rollingPageNumberMod = Math.floor(101 / resultsPerPage);
+  const visibleStudies = sortedStudies.filter(s => !deletedUids.has(s.studyInstanceUid));
+  const numOfStudies = visibleStudies.length;
   const rollingPageNumber = (pageNumber - 1) % rollingPageNumberMod;
   const offset = resultsPerPage * rollingPageNumber;
   const offsetAndTake = offset + resultsPerPage;
-  const tableDataSource = sortedStudies.map((study, key) => {
-    const rowKey = key + 1;
-    const isExpanded = expandedRows.some(k => k === rowKey);
+  const tableDataSource = visibleStudies.map(study => {
     const {
       studyInstanceUid,
       accession,
@@ -265,6 +341,7 @@ function WorkList({
       date,
       time,
     } = study;
+    const isExpanded = expandedRows.includes(studyInstanceUid);
     const studyDate =
       date &&
       moment(date, ['YYYYMMDD', 'YYYY.MM.DD'], true).isValid() &&
@@ -376,7 +453,8 @@ function WorkList({
               : []
           }
         >
-          <div className="flex flex-row gap-2">
+          <div className="flex w-full flex-row items-center gap-2">
+            <div className="flex flex-row gap-2">
             {(appConfig.groupEnabledModesFirst
               ? appConfig.loadedModes.sort((a, b) => {
                   const isValidA = a.isValidMode({
@@ -416,7 +494,7 @@ function WorkList({
                   <Link
                     className={isValidMode ? '' : 'cursor-not-allowed'}
                     key={i}
-                    to={`${mode.routeName}${dataPath || ''}?${query.toString()}`}
+                    to={`/${mode.routeName}${dataPath || ''}?${query.toString()}`}
                     onClick={event => {
                       // In case any event bubbles up for an invalid mode, prevent the navigation.
                       // For example, the event bubbles up when the icon embedded in the disabled button is clicked.
@@ -455,11 +533,49 @@ function WorkList({
                 )
               );
             })}
+            </div>
+            <div className="ml-auto">
+              {canDeleteStudies ? (
+                <Button
+                  type={ButtonEnums.type.primary}
+                  size={ButtonEnums.size.medium}
+                  className="!bg-red-600 hover:!bg-red-700"
+                  startIcon={<Icons.Delete className="!h-[18px] !w-[18px]" />}
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDeleteStudy(studyInstanceUid, patientName || studyInstanceUid);
+                  }}
+                >
+                  Delete
+                </Button>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex cursor-not-allowed">
+                      <Button
+                        type={ButtonEnums.type.primary}
+                        size={ButtonEnums.size.medium}
+                        className="!bg-red-600 opacity-50 hover:!bg-red-600"
+                        startIcon={<Icons.Delete className="!h-[18px] !w-[18px]" />}
+                        disabled
+                      >
+                        Delete
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    <div className="max-w-60 text-center text-sm">{deleteDisabledReason}</div>
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           </div>
         </StudyListExpandedRow>
       ),
       onClickRow: () =>
-        setExpandedRows(s => (isExpanded ? s.filter(n => rowKey !== n) : [...s, rowKey])),
+        setExpandedRows(s =>
+          isExpanded ? s.filter(uid => uid !== studyInstanceUid) : [...s, studyInstanceUid]
+        ),
       isExpanded,
     };
   });
@@ -476,7 +592,7 @@ function WorkList({
       onClick: () =>
         show({
           content: AboutModal as React.ComponentType,
-          title: t('AboutModal:About MedEx Viewer'),
+          title: t('AboutModal:About MedEx Studio'),
           containerClassName: 'max-w-md ',
         }),
     },

@@ -50,6 +50,17 @@ async function appInit(appConfigOrFunc, defaultExtensions, defaultModes) {
   appConfig.peerImport ||= peerImport;
   appConfig.measurementTrackingMode ||= 'standard';
 
+  if (typeof document !== 'undefined') {
+    const runtimeProductName =
+      typeof appConfig.getRuntimeProductName === 'function'
+        ? appConfig.getRuntimeProductName()
+        : null;
+
+    if (runtimeProductName) {
+      document.title = runtimeProductName;
+    }
+  }
+
   const extensionManager = new ExtensionManager({
     commandsManager,
     servicesManager,

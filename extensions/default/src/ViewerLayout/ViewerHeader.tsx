@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -8,6 +8,26 @@ import { Toolbar } from '../Toolbar/Toolbar';
 import HeaderPatientInfo from './HeaderPatientInfo';
 import { PatientInfoVisibility } from './HeaderPatientInfo/HeaderPatientInfo';
 import { preserveQueryParameters } from '@ohif/app';
+
+const getRuntimeProductName = () => {
+  if (typeof window === 'undefined') {
+    return 'MedEx Studio';
+  }
+
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isIPadLike =
+    /iPad/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const coarsePointer =
+    window.matchMedia?.('(pointer: coarse)')?.matches ||
+    window.matchMedia?.('(any-pointer: coarse)')?.matches ||
+    false;
+  const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+  const isTabletViewport = shortSide >= 768;
+  const isTabletLike = hasTouch && (isIPadLike || coarsePointer || isTabletViewport);
+
+  return isTabletLike ? 'MedEx Draw' : 'MedEx Studio';
+};
 
 function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }>) {
   const { servicesManager, extensionManager, commandsManager } = useSystem();
@@ -38,6 +58,33 @@ function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }
   const { t } = useTranslation();
   const { show } = useModal();
 
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const updateDocumentTitle = () => {
+      const runtimeProductName =
+        typeof appConfig?.getRuntimeProductName === 'function'
+          ? appConfig.getRuntimeProductName()
+          : getRuntimeProductName();
+
+      document.title = runtimeProductName;
+    };
+
+    updateDocumentTitle();
+
+    window.addEventListener('resize', updateDocumentTitle);
+    window.addEventListener('orientationchange', updateDocumentTitle);
+    window.addEventListener('pageshow', updateDocumentTitle);
+
+    return () => {
+      window.removeEventListener('resize', updateDocumentTitle);
+      window.removeEventListener('orientationchange', updateDocumentTitle);
+      window.removeEventListener('pageshow', updateDocumentTitle);
+    };
+  }, [appConfig]);
+
   const AboutModal = customizationService.getCustomization('ohif.aboutModal');
   const UserPreferencesModal = customizationService.getCustomization('ohif.userPreferencesModal');
 
@@ -48,7 +95,7 @@ function ViewerHeader({ appConfig }: withAppTypes<{ appConfig: AppTypes.Config }
       onClick: () =>
         show({
           content: AboutModal,
-          title: t('AboutModal:About MedEx Viewer'),
+          title: `About ${getRuntimeProductName()}`,
           containerClassName: 'max-w-md',
         }),
     },

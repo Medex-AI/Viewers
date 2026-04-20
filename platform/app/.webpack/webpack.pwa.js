@@ -27,6 +27,8 @@ const PROXY_PATH_REWRITE_TO = process.env.PROXY_PATH_REWRITE_TO;
 const IS_COVERAGE = process.env.COVERAGE === 'true';
 
 const OHIF_PORT = Number(process.env.OHIF_PORT || 3000);
+const OHIF_HOST = process.env.OHIF_HOST || '0.0.0.0';
+const OHIF_ALLOWED_HOSTS = process.env.OHIF_ALLOWED_HOSTS;
 const ENTRY_TARGET = process.env.ENTRY_TARGET || `${SRC_DIR}/index.js`;
 const Dotenv = require('dotenv-webpack');
 const writePluginImportFile = require('./writePluginImportsFile.js');
@@ -55,6 +57,9 @@ module.exports = (env, argv) => {
   const baseConfig = webpackBase(env, argv, { SRC_DIR, DIST_DIR });
   const isProdBuild = process.env.NODE_ENV === 'production';
   const hasProxy = PROXY_TARGET && PROXY_DOMAIN;
+  const allowedHosts = OHIF_ALLOWED_HOSTS
+    ? OHIF_ALLOWED_HOSTS.split(',').map(host => host.trim()).filter(Boolean)
+    : 'auto';
 
   const mergedConfig = merge(baseConfig, {
     entry: {
@@ -156,13 +161,21 @@ module.exports = (env, argv) => {
       // http2: true,
       // https: true,
       open: true,
+      host: OHIF_HOST,
       port: OHIF_PORT,
+      allowedHosts,
       client: {
         overlay: { errors: true, warnings: false },
       },
       proxy: {
         '/api/auth': {
-          target: process.env.AUTH_SERVICE_URL || 'http://auth-service:5000',
+          target: process.env.AUTH_SERVICE_URL || 'http://127.0.0.1:5000',
+          changeOrigin: true,
+          secure: false,
+          logLevel: 'debug',
+        },
+        '/api/segmentation-frames': {
+          target: process.env.AUTH_SERVICE_URL || 'http://127.0.0.1:5000',
           changeOrigin: true,
           secure: false,
           logLevel: 'debug',
@@ -184,6 +197,22 @@ module.exports = (env, argv) => {
           },
           onError: (err, req, res) => {
             console.error('Proxy error:', err);
+          },
+        },
+        '/orthanc-api': {
+          target: process.env.DICOMWEB_PROXY_TARGET || 'http://localhost:8042',
+          changeOrigin: true,
+          secure: false,
+          logLevel: 'debug',
+          pathRewrite: {
+            '^/orthanc-api': '',
+          },
+          onProxyReq: (proxyReq, req, res) => {
+            const target = process.env.DICOMWEB_PROXY_TARGET || 'http://localhost:8042';
+            console.log('Proxying Orthanc API request:', req.method, req.url, '->', target + req.url);
+          },
+          onError: (err, req, res) => {
+            console.error('Orthanc API proxy error:', err);
           },
         },
         '/dicom-microscopy-viewer': {

@@ -1,3 +1,4 @@
+import * as cornerstone from '@cornerstonejs/core';
 import { Types } from '@ohif/core';
 import { cache as cs3DCache, Enums, volumeLoader } from '@cornerstonejs/core';
 
@@ -17,6 +18,7 @@ class CornerstoneCacheService {
 
   stackImageIds: Map<string, string[]> = new Map();
   volumeImageIds: Map<string, string[]> = new Map();
+  hasShownCPUFallbackViewportWarning = false;
   readonly servicesManager: AppTypes.ServicesManager;
 
   constructor(servicesManager: AppTypes.ServicesManager) {
@@ -39,7 +41,8 @@ class CornerstoneCacheService {
   ): Promise<StackViewportData | VolumeViewportData> {
     const viewportType = viewportOptions.viewportType as string;
 
-    const cs3DViewportType = getCornerstoneViewportType(viewportType, displaySets);
+    const requestedViewportType = getCornerstoneViewportType(viewportType, displaySets);
+    const cs3DViewportType = this._getSupportedViewportTypeForEnvironment(requestedViewportType);
     let viewportData: StackViewportData | VolumeViewportData;
 
     if (
@@ -67,6 +70,33 @@ class CornerstoneCacheService {
     viewportData.viewportType = cs3DViewportType;
 
     return viewportData;
+  }
+
+  private _getSupportedViewportTypeForEnvironment(
+    viewportType: Enums.ViewportType
+  ): Enums.ViewportType {
+    const isVolumeViewportRequest =
+      viewportType === Enums.ViewportType.ORTHOGRAPHIC ||
+      viewportType === Enums.ViewportType.VOLUME_3D;
+
+    if (!isVolumeViewportRequest || !cornerstone.getShouldUseCPURendering()) {
+      return viewportType;
+    }
+
+    if (!this.hasShownCPUFallbackViewportWarning) {
+      const { uiNotificationService } = this.servicesManager.services;
+
+      uiNotificationService.show({
+        title: 'CPU rendering mode enabled',
+        message:
+          'Volume viewports are not available while CPU fallback rendering is enabled. Falling back to a stack viewport.',
+        type: 'warning',
+      });
+
+      this.hasShownCPUFallbackViewportWarning = true;
+    }
+
+    return Enums.ViewportType.STACK;
   }
 
   public async invalidateViewportData(

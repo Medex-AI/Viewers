@@ -4,8 +4,13 @@ import { InstanceMetadata, PhilipsPETPrivateGroup } from '@cornerstonejs/calcula
 
 const metadataProvider = OHIF.classes.MetadataProvider;
 
-export default function getPTImageIdInstanceMetadata(imageId: string): InstanceMetadata {
-  const dicomMetaData = metadataProvider.get('instance', imageId);
+export default function getPTImageIdInstanceMetadata(
+  imageIdOrMetadata: string | Record<string, unknown>
+): InstanceMetadata {
+  const dicomMetaData =
+    typeof imageIdOrMetadata === 'string'
+      ? metadataProvider.get('instance', imageIdOrMetadata)
+      : imageIdOrMetadata;
 
   if (!dicomMetaData) {
     throw new Error('dicom metadata are required');

@@ -165,14 +165,14 @@ const Dropdown: React.FC<DropdownProps> = ({
       return;
     }
 
-    const handleClick = (evt: MouseEvent) => {
+    const handlePointerDown = (evt: PointerEvent) => {
       if (!containerRef.current?.contains(evt.target as Node)) {
         setOpen(false);
       }
     };
 
-    window.addEventListener('mousedown', handleClick);
-    return () => window.removeEventListener('mousedown', handleClick);
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [open]);
 
   if (!activeOption) {

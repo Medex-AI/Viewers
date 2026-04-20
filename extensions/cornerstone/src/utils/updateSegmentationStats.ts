@@ -41,11 +41,32 @@ export async function updateSegmentationStats({
     return null;
   }
 
-  const stats = await cornerstoneTools.utilities.segmentation.getStatistics({
-    segmentationId,
-    segmentIndices,
-    mode: 'individual',
-  });
+  let stats;
+  try {
+    stats = await cornerstoneTools.utilities.segmentation.getStatistics({
+      segmentationId,
+      segmentIndices,
+      mode: 'individual',
+    });
+  } catch (error) {
+    if (
+      error instanceof TypeError &&
+      error.message.includes('getCompleteScalarDataArray is not a function')
+    ) {
+      console.debug(
+        'Skipping segmentation statistics update for unsupported voxel manager:',
+        segmentationId
+      );
+      return null;
+    }
+
+    console.warn(
+      'Failed to update segmentation statistics for segmentation:',
+      segmentationId,
+      error
+    );
+    return null;
+  }
 
   if (!stats) {
     return null;

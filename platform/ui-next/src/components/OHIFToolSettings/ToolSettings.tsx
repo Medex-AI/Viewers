@@ -62,7 +62,8 @@ const renderRangeSetting = option => {
           value={option.value}
           onChange={value => option.onChange?.(value)}
           allowNumberEdit={true}
-          inputClassName="ml-1 w-4/5 cursor-pointer"
+          showNumberInput={option.showNumberInput ?? true}
+          showInlineAdjustmentButtons={option.showInlineAdjustmentButtons}
         />
       </div>
     </div>

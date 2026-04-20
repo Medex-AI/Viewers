@@ -2,8 +2,10 @@ import { saveSegmentationFrame, loadSegmentationFrames } from './segmentationPer
 
 export interface SegmentationFramePayload {
   seriesInstanceUID: string;
+  studyInstanceUID: string;
   model: string;
   frameKey: string;
+  frameNumber?: number;
   width: number;
   height: number;
   maskData: Uint8Array;
@@ -35,8 +37,11 @@ export const getCachedSegmentationFrame = (
   return segmentationCache.get(seriesInstanceUID)?.get(model)?.get(frameKey);
 };
 
-export const hydrateSegmentationCache = async (seriesInstanceUID: string) => {
-  const entries = await loadSegmentationFrames(seriesInstanceUID);
+export const hydrateSegmentationCache = async (
+  seriesInstanceUID: string,
+  studyInstanceUID: string
+) => {
+  const entries = await loadSegmentationFrames(seriesInstanceUID, studyInstanceUID);
   if (!segmentationCache.has(seriesInstanceUID)) {
     segmentationCache.set(seriesInstanceUID, new Map());
   }
@@ -48,8 +53,10 @@ export const hydrateSegmentationCache = async (seriesInstanceUID: string) => {
     }
     modelMap.get(entry.model)!.set(entry.frameKey, {
       seriesInstanceUID: entry.seriesInstanceUID,
+      studyInstanceUID: entry.studyInstanceUID || '',
       model: entry.model,
       frameKey: entry.frameKey,
+      frameNumber: entry.frameNumber,
       width: entry.width,
       height: entry.height,
       maskData: entry.maskData,

@@ -91,13 +91,20 @@ export default function MoreDropdownMenu(bindProps) {
   }
 
   function BoundMoreDropdownMenu(props) {
+    const isTouchCapableDevice =
+      typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
             size="icon"
-            className="hidden group-hover:inline-flex data-[state=open]:inline-flex"
+            className={
+              isTouchCapableDevice
+                ? 'inline-flex'
+                : 'hidden group-hover:inline-flex data-[state=open]:inline-flex'
+            }
             onClick={e => {
               e.preventDefault();
               e.stopPropagation();

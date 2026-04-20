@@ -1,11 +1,86 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { SegmentationTable } from '@ohif/ui-next';
 import { useActiveViewportSegmentationRepresentations } from '../hooks/useActiveViewportSegmentationRepresentations';
 import { metaData } from '@cornerstonejs/core';
 import { useSystem } from '@ohif/core/src';
+import { useViewportGrid } from '@ohif/ui-next';
+import {
+  getSegmentationPersistenceStatus,
+  subscribeSegmentationPersistenceStatus,
+} from '../utils/segmentationPersistenceStatus';
+
+function SegmentationPersistenceHud({ viewportId }: { viewportId?: string }) {
+  const [status, setStatus] = useState(() => getSegmentationPersistenceStatus(viewportId));
+
+  useEffect(() => {
+    setStatus(getSegmentationPersistenceStatus(viewportId));
+  }, [viewportId]);
+
+  useEffect(() => {
+    return subscribeSegmentationPersistenceStatus(() => {
+      setStatus(getSegmentationPersistenceStatus(viewportId));
+    });
+  }, [viewportId]);
+
+  if (!status || status.kind === 'idle') {
+    return null;
+  }
+
+  const label =
+    status.kind === 'error'
+      ? 'Error'
+      : status.kind === 'saving'
+        ? 'Saving'
+        : status.kind === 'loading'
+          ? 'Loading'
+          : status.kind === 'dirty'
+            ? 'Unsaved'
+            : 'Synced';
+
+  const toneStyle =
+    status.kind === 'error'
+      ? {
+          borderColor: 'rgba(239, 68, 68, 0.45)',
+          backgroundColor: 'rgba(69, 10, 10, 0.85)',
+          color: '#fee2e2',
+        }
+      : status.kind === 'saving' || status.kind === 'loading'
+        ? {
+            borderColor: 'rgba(56, 189, 248, 0.45)',
+            backgroundColor: 'rgba(8, 47, 73, 0.85)',
+            color: '#e0f2fe',
+          }
+        : status.kind === 'dirty'
+          ? {
+              borderColor: 'rgba(245, 158, 11, 0.45)',
+              backgroundColor: 'rgba(69, 26, 3, 0.85)',
+              color: '#fef3c7',
+            }
+          : {
+              borderColor: 'rgba(16, 185, 129, 0.45)',
+              backgroundColor: 'rgba(6, 46, 24, 0.85)',
+              color: '#d1fae5',
+            };
+
+  return (
+    <div className="rounded border px-3 py-2 text-xs shadow-sm" style={toneStyle}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium uppercase tracking-wide">{label}</span>
+        <span className="opacity-70">
+          {new Date(status.updatedAt).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </span>
+      </div>
+      <div className="mt-1 leading-5">{status.message}</div>
+    </div>
+  );
+}
 
 export default function PanelSegmentation({ children }: withAppTypes) {
   const { commandsManager, servicesManager } = useSystem();
+  const [{ activeViewportId }] = useViewportGrid();
   const { customizationService, displaySetService } = servicesManager.services;
 
   const { segmentationsWithRepresentations, disabled } =
@@ -28,6 +103,10 @@ export default function PanelSegmentation({ children }: withAppTypes) {
 
   const CustomSegmentStatisticsHeader = customizationService.getCustomization(
     'panelSegmentation.customSegmentStatisticsHeader'
+  );
+
+  const CustomSegmentsList = customizationService.getCustomization(
+    'panelSegmentation.customSegmentsList'
   );
 
   // Create handlers object for all command runs
@@ -142,6 +221,10 @@ export default function PanelSegmentation({ children }: withAppTypes) {
   };
 
   const renderSegments = () => {
+    if (CustomSegmentsList) {
+      return <CustomSegmentsList />;
+    }
+
     return (
       <SegmentationTable.Segments>
         <SegmentationTable.SegmentStatistics.Header>
@@ -158,11 +241,10 @@ export default function PanelSegmentation({ children }: withAppTypes) {
       return (
         <SegmentationTable.Collapsed>
           <SegmentationTable.Collapsed.Header>
+            <SegmentationTable.Collapsed.Selector />
             <SegmentationTable.Collapsed.DropdownMenu>
               <CustomDropdownMenuContent />
             </SegmentationTable.Collapsed.DropdownMenu>
-            <SegmentationTable.Collapsed.Selector />
-            <SegmentationTable.Collapsed.Info />
           </SegmentationTable.Collapsed.Header>
           <SegmentationTable.Collapsed.Content>
             <SegmentationTable.AddSegmentRow />
@@ -176,11 +258,10 @@ export default function PanelSegmentation({ children }: withAppTypes) {
       <>
         <SegmentationTable.Expanded>
           <SegmentationTable.Expanded.Header>
+            <SegmentationTable.Expanded.Label />
             <SegmentationTable.Expanded.DropdownMenu>
               <CustomDropdownMenuContent />
             </SegmentationTable.Expanded.DropdownMenu>
-            <SegmentationTable.Expanded.Label />
-            <SegmentationTable.Expanded.Info />
           </SegmentationTable.Expanded.Header>
 
           <SegmentationTable.Expanded.Content>
@@ -193,11 +274,17 @@ export default function PanelSegmentation({ children }: withAppTypes) {
   };
 
   return (
-    <SegmentationTable {...tableProps}>
-      {children}
-      <SegmentationTable.Config />
-      <SegmentationTable.AddSegmentationRow />
-      {renderModeContent()}
-    </SegmentationTable>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SegmentationTable {...tableProps}>
+          {children}
+          <SegmentationTable.AddSegmentationRow />
+          {renderModeContent()}
+        </SegmentationTable>
+      </div>
+      <div className="sticky bottom-0 z-10 border-t border-white/10 bg-[#050816] px-2 py-3">
+        <SegmentationPersistenceHud viewportId={activeViewportId} />
+      </div>
+    </div>
   );
 }

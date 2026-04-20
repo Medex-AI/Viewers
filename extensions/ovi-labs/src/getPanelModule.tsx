@@ -1,5 +1,5 @@
 import React from 'react';
-import { AnalysisContainerPanel, SegmentationPanel } from './panels';
+import { AnalysisContainerPanel, SegmentationPanel, SegmentationExportPanel } from './panels';
 
 export default function getPanelModule({
   commandsManager,
@@ -26,6 +26,13 @@ export default function getPanelModule({
       iconLabel: 'Segmentation',
       label: 'Segmentation',
       component: () => <SegmentationPanel {...childProps} />,
+    },
+    {
+      name: 'segmentationExport',
+      iconName: 'Export',
+      iconLabel: 'Export',
+      label: 'Export',
+      component: () => <SegmentationExportPanel {...childProps} />,
     },
   ];
 }

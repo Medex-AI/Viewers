@@ -1,6 +1,14 @@
 import { cache, Types } from '@cornerstonejs/core';
 import { utilities } from '@cornerstonejs/tools';
 
+function _isVolumeViewport(
+  viewport: Types.IViewport | Types.IBaseVolumeViewport | null | undefined
+): viewport is Types.IBaseVolumeViewport {
+  return Boolean(
+    viewport && typeof (viewport as Types.IBaseVolumeViewport).getAllVolumeIds === 'function'
+  );
+}
+
 function _getVolumeFromViewport(viewport: Types.IBaseVolumeViewport) {
   const volumeIds = viewport.getAllVolumeIds();
   const volumes = volumeIds.map(id => cache.getVolume(id));
@@ -27,8 +35,11 @@ function _getSyncedViewports(servicesManager: AppTypes.ServicesManager, srcViewp
   }
 
   const srcViewport = cornerstoneViewportService.getCornerstoneViewport(srcViewportId);
+  if (!_isVolumeViewport(srcViewport)) {
+    return [];
+  }
 
-  const srcVolume = srcViewport ? _getVolumeFromViewport(srcViewport) : null;
+  const srcVolume = _getVolumeFromViewport(srcViewport);
 
   if (!srcVolume?.isDynamicVolume()) {
     return [];
@@ -40,7 +51,11 @@ function _getSyncedViewports(servicesManager: AppTypes.ServicesManager, srcViewp
     .filter(({ viewportId }) => {
       const viewport = cornerstoneViewportService.getCornerstoneViewport(viewportId);
 
-      return viewportId !== srcViewportId && viewport?.hasVolumeId?.(srcVolumeId);
+      return (
+        viewportId !== srcViewportId &&
+        _isVolumeViewport(viewport) &&
+        viewport.hasVolumeId?.(srcVolumeId)
+      );
     })
     .map(({ viewportId }) => ({ viewportId }));
 }

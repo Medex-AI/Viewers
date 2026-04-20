@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LoginPageProps } from './types';
 import styles from './LoginPage.module.css';
@@ -6,6 +6,25 @@ import authService from '../../services/authService';
 import { notifyUserLogin } from '../../services/authServiceIntegration';
 
 const LOGO_URL = '/assets/images/medex-logo.svg';
+const getRuntimeProductName = () => {
+  if (typeof window === 'undefined') {
+    return 'MedEx Studio';
+  }
+
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isIPadLike =
+    /iPad/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const coarsePointer =
+    window.matchMedia?.('(pointer: coarse)')?.matches ||
+    window.matchMedia?.('(any-pointer: coarse)')?.matches ||
+    false;
+  const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+  const isTabletViewport = shortSide >= 768;
+  const isTabletLike = hasTouch && (isIPadLike || coarsePointer || isTabletViewport);
+
+  return isTabletLike ? 'MedEx Draw' : 'MedEx Studio';
+};
 
 const LoginPage: React.FC<LoginPageProps> = ({ onLogin, redirectTo }) => {
   console.log('LoginPage component loaded'); // Debug log
@@ -15,6 +34,36 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin, redirectTo }) => {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const resolvedRedirectUrl =
+    redirectTo || new URLSearchParams(window.location.search).get('redirect') || '/medex-app';
+
+  useEffect(() => {
+    if (authService.isAuthenticated()) {
+      navigate(resolvedRedirectUrl, { replace: true });
+    }
+  }, [navigate, resolvedRedirectUrl]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const updateDocumentTitle = () => {
+      document.title = getRuntimeProductName();
+    };
+
+    updateDocumentTitle();
+
+    window.addEventListener('resize', updateDocumentTitle);
+    window.addEventListener('orientationchange', updateDocumentTitle);
+    window.addEventListener('pageshow', updateDocumentTitle);
+
+    return () => {
+      window.removeEventListener('resize', updateDocumentTitle);
+      window.removeEventListener('orientationchange', updateDocumentTitle);
+      window.removeEventListener('pageshow', updateDocumentTitle);
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     console.log('Form submitted!'); // Debug log
@@ -41,12 +90,11 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin, redirectTo }) => {
         
         // Use React Router navigation instead of window.location.href
         // This avoids a full page reload and maintains authentication state
-        const redirectUrl = redirectTo || new URLSearchParams(window.location.search).get('redirect') || '/app';
-        console.log('Navigating to:', redirectUrl);
+        console.log('Navigating to:', resolvedRedirectUrl);
         
         // Small delay to ensure authentication state is fully synchronized
         setTimeout(() => {
-          navigate(redirectUrl, { replace: true });
+          navigate(resolvedRedirectUrl, { replace: true });
         }, 100);
       } else {
         console.log('Login failed:', result.error); // Debug log

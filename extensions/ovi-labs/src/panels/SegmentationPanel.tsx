@@ -1,21 +1,25 @@
 import React, { useEffect, useCallback, useState, useRef } from 'react';
-import { eventTarget, utilities as csUtils } from '@cornerstonejs/core';
-import { annotation, Enums as toolEnums, utilities as toolUtils } from '@cornerstonejs/tools';
+import { eventTarget, cache, imageLoader, metaData } from '@cornerstonejs/core';
+import { annotation, Enums as toolEnums } from '@cornerstonejs/tools';
 import { useViewportGrid } from '@ohif/ui-next';
 import {
   SegmentationModelSelector,
   SegmentationLabelsList,
-  SegmentationExportControls,
 } from '../components/segmentation';
+import {
+  buildNiftiBuffer,
+  buildZipBuffer,
+  gzipBuffer,
+  downloadBlob,
+} from '../utils/roiExport';
+import { readActiveSegmentationFrames } from '../utils/oviSegmentation';
+import { extractFrameTimingFromImageIds } from '../utils/dicomMetadataExtractor';
 import { DicomMetadataStore } from '@ohif/core';
 import {
-  SEGMENTATION_LABELS,
   syncLabelsFromAnnotations,
   getSegmentationState,
   subscribeSegmentationState,
 } from '../utils/segmentationStore';
-import { maskToContours } from '../utils/maskToContour';
-import { runMaskedOtsu } from '../utils/otsuThresholding';
 import {
   cacheSegmentationFrame,
   getCachedSegmentationFrame,
@@ -23,6 +27,13 @@ import {
 } from '../utils/segmentationManager';
 import segmentationApi from '../services/segmentationApi';
 import { getModelParams } from '../utils/segmentationParamsStore';
+import { isPointInPolygon } from '../utils/rasterizeContour';
+import {
+  ensureOviSegmentationForViewport,
+  OVI_SEGMENTATION_LABELS,
+  syncDerivedContoursFromSegmentation,
+  writeMaskToActiveSegmentation,
+} from '../utils/oviSegmentation';
 
 interface SegmentationPanelProps {
   commandsManager?: any;
@@ -45,15 +56,14 @@ const ROI_TOOL_NAME = 'RotatableRectangleROI';
 const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
   commandsManager,
   servicesManager,
-  extensionManager,
 }) => {
   const [roiAnnotation, setRoiAnnotation] = useState<any>(null);
   const [revision, setRevision] = useState(0);
   const [currentImageId, setCurrentImageId] = useState<string | undefined>(undefined);
   const [activeModel, setActiveModelState] = useState(getSegmentationState().activeModel);
-  const [otsuClasses, setOtsuClasses] = useState(4);
   const [isRecomputing, setIsRecomputing] = useState(false);
   const [recomputeStatusText, setRecomputeStatusText] = useState<string | undefined>(undefined);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [{ activeViewportId }] = useViewportGrid();
   const hydratedSeriesRef = useRef<Set<string>>(new Set());
 
@@ -125,11 +135,12 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
     if (!currentImageId) return;
     const instance = DicomMetadataStore.getInstanceByImageId(currentImageId);
     const seriesInstanceUID = instance?.SeriesInstanceUID;
-    if (!seriesInstanceUID || hydratedSeriesRef.current.has(seriesInstanceUID)) {
+    const studyInstanceUID = instance?.StudyInstanceUID;
+    if (!seriesInstanceUID || !studyInstanceUID || hydratedSeriesRef.current.has(seriesInstanceUID)) {
       return;
     }
 
-    void hydrateSegmentationCache(seriesInstanceUID).then(() => {
+    void hydrateSegmentationCache(seriesInstanceUID, studyInstanceUID).then(() => {
       hydratedSeriesRef.current.add(seriesInstanceUID);
     });
   }, [currentImageId]);
@@ -148,119 +159,71 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
 
     return null;
   }, []);
+  const handleExportNifti = useCallback(async (mode: 'label' | 'both') => {
+    if (!activeViewportId || !servicesManager) return;
 
-  const isPointInPolygon = (point: [number, number], polygon: number[][]): boolean => {
-    const [x, y] = point;
-    let inside = false;
+    const uiNotificationService = servicesManager?.services?.uiNotificationService;
+    const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
 
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const [xi, yi] = polygon[i];
-      const [xj, yj] = polygon[j];
+    try {
+      const viewport = cornerstoneViewportService?.getCornerstoneViewport(activeViewportId);
+      const imageIds: string[] = viewport?.getImageIds?.() ?? [];
 
-      const intersect =
-        yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-
-      if (intersect) {
-        inside = !inside;
+      if (!imageIds.length) {
+        uiNotificationService?.show?.({ title: 'Export', message: 'No images found in viewport.', type: 'error', duration: 3000 });
+        return;
       }
-    }
 
-    return inside;
-  };
+      const imagePlane = metaData.get('imagePlaneModule', imageIds[0]) ?? {};
+      const spacing = {
+        row: (imagePlane.rowPixelSpacing ?? imagePlane.columnPixelSpacing ?? 1) as number,
+        column: (imagePlane.columnPixelSpacing ?? imagePlane.rowPixelSpacing ?? 1) as number,
+      };
+      const { frameTimeMs } = extractFrameTimingFromImageIds(imageIds);
+      const files: { name: string; data: ArrayBuffer }[] = [];
 
-  const createContoursFromLabelMask = useCallback(
-    ({
-      labels,
-      width,
-      height,
-      labelMap,
-      modelType,
-      viewport,
-      element,
-      frameOfReferenceUID,
-      referencedImageId,
-    }: {
-      labels: Uint8Array;
-      width: number;
-      height: number;
-      labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }>;
-      modelType: string;
-      viewport: any;
-      element: HTMLElement;
-      frameOfReferenceUID: string;
-      referencedImageId?: string;
-    }) => {
-      const annotationManager = annotation.state.getAnnotationManager();
-      if (!annotationManager) return;
-
-      const existingContours =
-        annotationManager.getAnnotations(frameOfReferenceUID, MANUAL_CONTOUR_TOOL_NAME) || [];
-      existingContours.forEach(existing => {
-        if (
-          (existing.data?.modelType || 'manual') === modelType &&
-          (!referencedImageId || existing.metadata?.referencedImageId === referencedImageId)
-        ) {
-          annotation.state.removeAnnotation(existing.annotationUID);
+      if (mode === 'both') {
+        const imageFrames: Array<Int16Array | Uint16Array | Uint8Array | Float32Array> = [];
+        let imgWidth = 0;
+        let imgHeight = 0;
+        for (const imageId of imageIds) {
+          const image = cache.getImage(imageId) ?? (await imageLoader.loadAndCacheImage(imageId));
+          const rawData = image?.voxelManager?.getScalarData?.() ?? image?.getPixelData?.();
+          if (!rawData) continue;
+          imgWidth = image.columns ?? image.width ?? imgWidth;
+          imgHeight = image.rows ?? image.height ?? imgHeight;
+          imageFrames.push(rawData.slice() as Int16Array);
         }
-      });
+        if (imageFrames.length && imgWidth && imgHeight) {
+          const nifti = buildNiftiBuffer({ frames: imageFrames, width: imgWidth, height: imgHeight, spacing, frameTimeMs });
+          files.push({ name: 'image.nii.gz', data: await gzipBuffer(nifti) });
+        }
+      }
 
-      const now = Date.now();
-      Object.entries(labelMap).forEach(([indexString, labelInfo]) => {
-        const labelValue = Number(indexString);
-        const contours = maskToContours(labels, width, height, labelValue);
-        contours.forEach(contour => {
-          if (contour.length < 3) return;
-          const worldPoints = contour.map(point => viewport.canvasToWorld(point));
-
-          const annotationUID = csUtils.uuidv4();
-          annotationManager.addAnnotation({
-            annotationUID,
-            highlighted: false,
-            isLocked: false,
-            isVisible: true,
-            invalidated: true,
-            metadata: {
-              toolName: MANUAL_CONTOUR_TOOL_NAME,
-              FrameOfReferenceUID: frameOfReferenceUID,
-              referencedImageId,
-            },
-            data: {
-              contour: {
-                polyline: worldPoints,
-                closed: true,
-              },
-              handles: {
-                points: worldPoints,
-                activeHandleIndex: null,
-              },
-              labelId: labelInfo.labelId,
-              labelName: labelInfo.labelName,
-              labelColor: labelInfo.labelColor,
-              fillColor: labelInfo.labelColor,
-              fillOpacity: 0.2,
-              renderFill: true,
-              modelType,
-              createdAt: now,
-              modifiedAt: now,
-            },
-          });
-
-          annotation.config.style.setAnnotationStyles(annotationUID, {
-            color: labelInfo.labelColor,
-            colorHighlighted: labelInfo.labelColor,
-            colorSelected: labelInfo.labelColor,
-          });
+      const labelFrames = await readActiveSegmentationFrames({ servicesManager, viewportId: activeViewportId });
+      if (labelFrames.length) {
+        const nifti = buildNiftiBuffer({
+          frames: labelFrames.map(f => new Uint8Array(f.scalarData)),
+          width: labelFrames[0].width,
+          height: labelFrames[0].height,
+          spacing,
+          frameTimeMs,
         });
-      });
+        files.push({ name: 'label.nii.gz', data: await gzipBuffer(nifti) });
+      }
 
-      const viewportIdsToRender = toolUtils.viewportFilters.getViewportIdsWithToolToRender(
-        element,
-        MANUAL_CONTOUR_TOOL_NAME
-      );
-      toolUtils.triggerAnnotationRenderForViewportIds(viewportIdsToRender);
-    },
-    []
-  );
+      if (!files.length) {
+        uiNotificationService?.show?.({ title: 'Export', message: 'Nothing to export — check that a segmentation exists.', type: 'warning', duration: 3000 });
+        return;
+      }
+
+      downloadBlob(new Blob([buildZipBuffer(files)], { type: 'application/zip' }), 'segmentation_export.zip');
+      uiNotificationService?.show?.({ title: 'Export Complete', message: `Downloaded: ${files.map(f => f.name).join(', ')}`, type: 'success', duration: 3000 });
+    } catch (err) {
+      console.error('[SegmentationExport] Export failed:', err);
+      uiNotificationService?.show?.({ title: 'Export Failed', message: err instanceof Error ? err.message : 'Unknown error', type: 'error', duration: 5000 });
+    }
+  }, [activeViewportId, servicesManager]);
 
   const runOtsuSegmentation = useCallback(async () => {
     if (!activeViewportId || !servicesManager) return;
@@ -475,7 +438,8 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
           });
         });
 
-        const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> = {};
+        const labelMap: Record<number, { labelId: string; labelName: string; labelColor: string }> =
+          {};
         result.result.labels.forEach(label => {
           labelMap[label.id] = {
             labelId: mapBackendLabelId(label),
@@ -484,33 +448,63 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
           };
         });
 
-        const frameOfReferenceUID = viewport.getFrameOfReferenceUID?.();
-        if (!frameOfReferenceUID) {
-          throw new Error('Missing frame of reference for segmentation output.');
+        if (selectedModel === 'manual') {
+          throw new Error('Manual model cannot be recomputed.');
         }
 
-        createContoursFromLabelMask({
-          labels,
-          width: frameData.width,
-          height: frameData.height,
-          labelMap,
-          modelType: selectedModel,
-          viewport,
-          element,
-          frameOfReferenceUID,
+        await ensureOviSegmentationForViewport(servicesManager, activeViewportId);
+
+        const canonicalMask = new Uint8Array(labels.length);
+        result.result.labels.forEach(label => {
+          const mappedLabelId = mapBackendLabelId(label);
+          const segmentIndex =
+            OVI_SEGMENTATION_LABELS.find(item => item.id === mappedLabelId)?.segmentIndex ??
+            label.id;
+
+          for (let i = 0; i < labels.length; i += 1) {
+            if (labels[i] === label.id) {
+              canonicalMask[i] = segmentIndex;
+            }
+          }
+
+          labelMap[segmentIndex] = {
+            labelId: mappedLabelId,
+            labelName: label.name,
+            labelColor: label.color,
+          };
+        });
+
+        const frameSegmentation = await writeMaskToActiveSegmentation({
+          servicesManager,
+          viewportId: activeViewportId,
           referencedImageId: target.imageId,
+          maskData: canonicalMask,
+        });
+
+        if (!frameSegmentation) {
+          throw new Error('Unable to write segmentation result into the OVI Labs labelmap.');
+        }
+
+        await syncDerivedContoursFromSegmentation({
+          servicesManager,
+          viewportId: activeViewportId,
+          referencedImageId: target.imageId,
+          modelType: selectedModel,
         });
 
         const instance = DicomMetadataStore.getInstanceByImageId(target.imageId);
         const seriesInstanceUID = instance?.SeriesInstanceUID;
-        if (seriesInstanceUID) {
+        const studyInstanceUID = instance?.StudyInstanceUID;
+        if (seriesInstanceUID && studyInstanceUID) {
           void cacheSegmentationFrame({
             seriesInstanceUID,
+            studyInstanceUID,
             model: selectedModel,
             frameKey: target.imageId,
+            frameNumber: target.frameIndex + 1,
             width: frameData.width,
             height: frameData.height,
-            maskData: labels,
+            maskData: canonicalMask,
             labelMap,
           });
         }
@@ -540,7 +534,7 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
       setRecomputeStatusText(undefined);
       setIsRecomputing(false);
     }
-  }, [activeViewportId, servicesManager, currentImageId, createContoursFromLabelMask]);
+  }, [activeViewportId, servicesManager, currentImageId]);
 
   useEffect(() => {
     if (activeModel !== 'otsu' || !currentImageId || !servicesManager || !activeViewportId) {
@@ -554,38 +548,24 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
     const cached = getCachedSegmentationFrame(seriesInstanceUID, 'otsu', currentImageId);
     if (!cached) return;
 
-    const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
-    const viewport = cornerstoneViewportService?.getCornerstoneViewport(activeViewportId);
-    const viewportInfo = cornerstoneViewportService?.getViewportInfo(activeViewportId);
-    const element = viewportInfo?.element as HTMLElement | undefined;
-    const frameOfReferenceUID = viewport?.getFrameOfReferenceUID?.();
-    const annotationManager = annotation.state.getAnnotationManager();
+    void writeMaskToActiveSegmentation({
+      servicesManager,
+      viewportId: activeViewportId,
+      referencedImageId: currentImageId,
+      maskData: cached.maskData,
+    }).then(async frame => {
+      if (!frame) {
+        return;
+      }
 
-    if (!viewport || !element || !frameOfReferenceUID || !annotationManager) return;
-
-    const existingContours =
-      annotationManager.getAnnotations(frameOfReferenceUID, MANUAL_CONTOUR_TOOL_NAME) || [];
-    const hasOtsu = existingContours.some(existing => {
-      const matchesModel = (existing.data?.modelType || 'manual') === 'otsu';
-      const matchesFrame =
-        !currentImageId || existing.metadata?.referencedImageId === currentImageId;
-      return matchesModel && matchesFrame;
-    });
-
-    if (!hasOtsu) {
-      createContoursFromLabelMask({
-        labels: cached.maskData,
-        width: cached.width,
-        height: cached.height,
-        labelMap: cached.labelMap,
-        modelType: 'otsu',
-        viewport,
-        element,
-        frameOfReferenceUID,
+      await syncDerivedContoursFromSegmentation({
+        servicesManager,
+        viewportId: activeViewportId,
         referencedImageId: currentImageId,
+        modelType: 'otsu',
       });
-    }
-  }, [activeModel, currentImageId, servicesManager, activeViewportId, createContoursFromLabelMask]);
+    });
+  }, [activeModel, currentImageId, servicesManager, activeViewportId]);
 
   // Sync labels from ManualContour annotations
   const updateLabelsFromAnnotations = useCallback(() => {
@@ -736,21 +716,6 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
 
       {/* Content */}
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-3">
-        {/* Model Selector Section */}
-        <div className="flex flex-col gap-2">
-          <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
-            Model
-          </label>
-          <SegmentationModelSelector
-            commandsManager={commandsManager}
-            servicesManager={servicesManager}
-            onRecompute={runOtsuSegmentation}
-            isRecomputing={isRecomputing}
-            recomputeStatusText={recomputeStatusText}
-          />
-          {/* Model configuration is now handled via gear icon modal */}
-        </div>
-
         {/* Labels List Section */}
         <div className="flex flex-1 flex-col gap-2">
           <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
@@ -765,8 +730,46 @@ const SegmentationPanel: React.FC<SegmentationPanelProps> = ({
           />
         </div>
 
-        {/* Export Controls Section */}
-        <SegmentationExportControls servicesManager={servicesManager} />
+        {/* Advanced Section */}
+        <div className="flex flex-col">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between py-1 text-[10px] font-medium uppercase tracking-wide text-gray-500 hover:text-gray-300"
+            onClick={() => setAdvancedOpen(o => !o)}
+          >
+            <span>Advanced</span>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className={`h-3 w-3 transition-transform ${advancedOpen ? 'rotate-180' : ''}`}
+            >
+              <path
+                fillRule="evenodd"
+                d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+          {advancedOpen && (
+            <div className="flex flex-col gap-4 pt-2">
+              {/* Model Selector Section */}
+              <div className="flex flex-col gap-2">
+                <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                  Model
+                </label>
+                <SegmentationModelSelector
+                  commandsManager={commandsManager}
+                  servicesManager={servicesManager}
+                  onRecompute={runOtsuSegmentation}
+                  isRecomputing={isRecomputing}
+                  recomputeStatusText={recomputeStatusText}
+                  onExportNifti={handleExportNifti}
+                />
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

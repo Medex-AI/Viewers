@@ -9,6 +9,7 @@
   height: 100%;
   position: relative;
   background-color: black;
+  touch-action: none;
 
   /* Prevent the blue outline in Chrome when a viewport is selected */
   outline: 0 !important;

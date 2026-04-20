@@ -22,7 +22,6 @@ import {
   RectangleScissorsTool,
   SphereScissorsTool,
   CircleScissorsTool,
-  BrushTool,
   PaintFillTool,
   init,
   addTool,
@@ -49,6 +48,7 @@ import ImageOverlayViewerTool from './tools/ImageOverlayViewerTool';
 import ManualContourTool from './tools/ManualContourTool';
 import MaskContourTool from './tools/MaskContourTool';
 import RotatableRectangleROITool from './tools/RotatableRectangleROITool';
+import StylusAwareBrushTool from './tools/StylusAwareBrushTool';
 
 export default function initCornerstoneTools(configuration = {}) {
   CrosshairsTool.isAnnotation = false;
@@ -90,7 +90,7 @@ export default function initCornerstoneTools(configuration = {}) {
   addTool(RectangleScissorsTool);
   addTool(SphereScissorsTool);
   addTool(CircleScissorsTool);
-  addTool(BrushTool);
+  addTool(StylusAwareBrushTool);
   addTool(PaintFillTool);
   addTool(ReferenceLinesTool);
   addTool(CalibrationLineTool);
@@ -147,7 +147,7 @@ const toolNames = {
   CobbAngle: CobbAngleTool.toolName,
   Magnify: MagnifyTool.toolName,
   Crosshairs: CrosshairsTool.toolName,
-  Brush: BrushTool.toolName,
+  Brush: StylusAwareBrushTool.toolName,
   PaintFill: PaintFillTool.toolName,
   ReferenceLines: ReferenceLinesTool.toolName,
   CalibrationLine: CalibrationLineTool.toolName,

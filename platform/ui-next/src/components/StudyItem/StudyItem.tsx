@@ -24,6 +24,9 @@ const StudyItem = ({
   StudyMenuItems,
   StudyInstanceUID,
 }: withAppTypes) => {
+  const isTouchCapableDevice =
+    typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
   return (
     <Accordion
       type="single"
@@ -35,7 +38,12 @@ const StudyItem = ({
       defaultValue={isActive ? 'study-item' : undefined}
     >
       <AccordionItem value="study-item">
-        <AccordionTrigger className={classnames('hover:bg-accent bg-popover group w-full rounded')}>
+        <AccordionTrigger
+          className={classnames(
+            'bg-popover group w-full rounded',
+            !isTouchCapableDevice && 'hover:bg-accent'
+          )}
+        >
           <div className="flex h-[40px] w-full flex-row overflow-hidden">
             <div className="flex w-full flex-row items-center justify-between">
               <div className="flex min-w-0 flex-col items-start text-[13px]">

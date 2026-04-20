@@ -1107,6 +1107,10 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
       // Reset the camera for all viewports using position presentation to maintain relative size/position
       // which means only those viewports that have a zoom level of 1.
       this.beforeResizePositionPresentations.forEach((positionPresentation, viewportId) => {
+        if (positionPresentation?.viewportType === csEnums.ViewportType.STACK) {
+          return;
+        }
+
         this.setPresentations(viewportId, {
           positionPresentation,
         });
@@ -1154,6 +1158,18 @@ class CornerstoneViewportService extends PubSubService implements IViewportServi
     viewport: Types.IStackViewport | Types.IVolumeViewport,
     positionPresentation: PositionPresentation
   ): void {
+    if (
+      positionPresentation?.viewportType !== undefined &&
+      positionPresentation.viewportType !== viewport.type
+    ) {
+      console.warn(
+        'Skipping position presentation because viewport type changed',
+        positionPresentation.viewportType,
+        viewport.type
+      );
+      return;
+    }
+
     const viewRef = positionPresentation?.viewReference;
     if (viewRef) {
       if (viewport.isReferenceViewable(viewRef, WITH_NAVIGATION)) {

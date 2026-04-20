@@ -166,9 +166,15 @@ interface SingleRangeProps {
   showNumberInput?: boolean;
   sliderClassName?: string;
   numberInputClassName?: string;
+  beforeNumberInput?: React.ReactNode;
 }
 
-function SingleRange({ showNumberInput, sliderClassName, numberInputClassName }: SingleRangeProps) {
+function SingleRange({
+  showNumberInput,
+  sliderClassName,
+  numberInputClassName,
+  beforeNumberInput,
+}: SingleRangeProps) {
   const ctx = useContext(NumericMetaContext);
   if (!ctx) {
     throw new Error('SingleRange must be used inside <Numeric.Container>.');
@@ -208,15 +214,18 @@ function SingleRange({ showNumberInput, sliderClassName, numberInputClassName }:
         onValueChange={handleSliderChange}
       />
       {showNumberInput && (
-        <Input
-          type="number"
-          className={cn('w-[50px] shrink-0', numberInputClassName)}
-          value={singleValue}
-          step={step}
-          min={min}
-          max={max}
-          onChange={handleNumberChange}
-        />
+        <>
+          {beforeNumberInput}
+          <Input
+            type="number"
+            className={cn('w-[50px] shrink-0', numberInputClassName)}
+            value={singleValue}
+            step={step}
+            min={min}
+            max={max}
+            onChange={handleNumberChange}
+          />
+        </>
       )}
     </div>
   );

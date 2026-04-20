@@ -16,6 +16,8 @@ export type CinePlayerProps = {
   onFrameRateChange: (value: number) => void;
   onPlayPauseChange: (value: boolean) => void;
   onClose: () => void;
+  onStepFrame?: (delta: number) => void;
+  onStepTime?: (delta: number) => void;
   updateDynamicInfo?: (info: any) => void;
   dynamicInfo?: {
     dimensionGroupNumber: number;
@@ -34,6 +36,8 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
   onFrameRateChange = () => {},
   onPlayPauseChange = () => {},
   onClose = () => {},
+  onStepFrame,
+  onStepTime,
   dynamicInfo = {},
   updateDynamicInfo,
 }) => {
@@ -70,17 +74,37 @@ const CinePlayer: React.FC<CinePlayerProps> = ({
   return (
     <div className={className}>
       {isDynamic && dynamicInfo && (
-        <Numeric.Container
-          mode="singleRange"
-          min={1}
-          max={dynamicInfo.numDimensionGroups}
-          step={1}
-          value={dynamicInfo.dimensionGroupNumber}
-          onChange={val => handleDimensionGroupNumberChange(val as number)}
-          className="mb-3 w-full"
-        >
-          <Numeric.SingleRange showNumberInput={false} />
-        </Numeric.Container>
+        <div className="mb-3 flex w-full items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={() => onStepTime?.(-1)}
+            data-cy="cine-player-prev-time"
+          >
+            <span className="text-sm leading-none">&lt;</span>
+          </Button>
+          <Numeric.Container
+            mode="singleRange"
+            min={1}
+            max={dynamicInfo.numDimensionGroups}
+            step={1}
+            value={dynamicInfo.dimensionGroupNumber}
+            onChange={val => handleDimensionGroupNumberChange(val as number)}
+            className="min-w-0 flex-1"
+          >
+            <Numeric.SingleRange showNumberInput={false} />
+          </Numeric.Container>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={() => onStepTime?.(1)}
+            data-cy="cine-player-next-time"
+          >
+            <span className="text-sm leading-none">&gt;</span>
+          </Button>
+        </div>
       )}
       <div className={'bg-muted inline-flex select-none items-center gap-2 rounded-md px-2 py-2'}>
         <Button
@@ -158,6 +182,8 @@ CinePlayer.propTypes = {
   onPlayPauseChange: PropTypes.func,
   onFrameRateChange: PropTypes.func,
   onClose: PropTypes.func,
+  onStepFrame: PropTypes.func,
+  onStepTime: PropTypes.func,
   isDynamic: PropTypes.bool,
   dynamicInfo: PropTypes.shape({
     dimensionGroupNumber: PropTypes.number,

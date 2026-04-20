@@ -242,6 +242,55 @@ export default class ToolGroupService {
     return this.getToolGroup(toolGroupId)?.getActivePrimaryMouseButtonTool();
   }
 
+  private _canSafelySetToolPassive(toolGroup: Types.IToolGroup, toolName: string): boolean {
+    const viewportIds = toolGroup.getViewportIds?.() ?? [];
+
+    if (!viewportIds.length) {
+      return false;
+    }
+
+    // Brush-family tools can try to reject preview state during passive-mode
+    // transitions, which requires an enabled viewport element to exist first.
+    const isBrushLikeTool =
+      /brush|eraser|threshold/i.test(toolName) || toolName === 'CircularBrushForAutoSegmentAI';
+
+    if (!isBrushLikeTool) {
+      return true;
+    }
+
+    return viewportIds.some(({ viewportId, renderingEngineId }) => {
+      try {
+        return Boolean(this.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId));
+      } catch {
+        return Boolean(viewportId && renderingEngineId);
+      }
+    });
+  }
+
+  private _setToolPassiveSafely(toolGroup: Types.IToolGroup, toolName: string): void {
+    if (!this._canSafelySetToolPassive(toolGroup, toolName)) {
+      return;
+    }
+
+    try {
+      toolGroup.setToolPassive(toolName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isEnabledElementTimingError =
+        message.includes("Cannot destructure property 'viewport' of 'enabledElement'") ||
+        message.includes('enabledElement');
+
+      if (!isEnabledElementTimingError) {
+        throw error;
+      }
+
+      console.warn('[ToolGroupService] skipping setToolPassive until viewport is ready', {
+        toolGroupId: toolGroup.id,
+        toolName,
+      });
+    }
+  }
+
   private _setToolsMode(toolGroup, tools) {
     const { active, passive, enabled, disabled } = tools;
 
@@ -253,7 +302,7 @@ export default class ToolGroupService {
 
     if (passive) {
       passive.forEach(({ toolName }) => {
-        toolGroup.setToolPassive(toolName);
+        this._setToolPassiveSafely(toolGroup, toolName);
       });
     }
 
