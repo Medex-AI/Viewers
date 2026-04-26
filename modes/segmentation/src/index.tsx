@@ -1,4 +1,4 @@
-import { eventTarget, cache, imageLoader } from '@cornerstonejs/core';
+import { eventTarget, cache } from '@cornerstonejs/core';
 import {
   annotation,
   Enums as toolEnums,
@@ -9,22 +9,26 @@ import toolbarButtons from './toolbarButtons';
 import initToolGroups from './initToolGroups';
 import { syncManualContourColor } from './syncManualContourColor';
 import { writeContourToOhifLabelmap } from './writeContourToOhifLabelmap';
-import { loadSegFrames } from './segmentationStorage';
 import { hexToRgba255 } from '../../../extensions/ovi-labs/src/utils/colorUtils';
 import {
   notifySegmentationPersistenceError,
   updatePersistenceStatus,
   logSegmentationTimeline,
-  getFrameNumberFromImageId,
-  getStableFrameKey,
-  getSanitizedLabelmapFrames,
-  buildPersistedLabelMap,
-  applySavedFramesToLabelmapVolume,
   saveAllFrames,
   getManualSaveSegmentationId,
   restoreFrames,
+  tryAutoCreateSegmentationFromBackend,
+  type SaveOptions,
   type SaveScope,
 } from './segmentationPersistenceOps';
+import {
+  setPhase,
+  getPhase,
+  canAutosave,
+  markDirty,
+  destroyAll as destroyAdapterState,
+} from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
+import { resolveSliceIdentity } from '../../../medex/segmentation/src/utils/sliceIdentityResolver';
 
 const DEFAULT_BRUSH_SIZE_MM = 3;
 const DEFAULT_BRUSH_TOOL_NAMES = [
@@ -86,9 +90,12 @@ function modeFactory({ modeConfiguration }) {
   let _unsubscribeViewportDataChanged: (() => void) | null = null;
   let _onKeyDown: ((evt: KeyboardEvent) => void) | null = null;
   const _saveDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const _autoRestoredSegmentationIds = new Set<string>();
-  const _restoreInProgressSegmentationIds = new Set<string>();
-  const _autosaveArmedSegmentationIds = new Set<string>();
+  const _saveDebounceOptions = new Map<string, Partial<SaveOptions>>();
+  // Scoped diagnostic logger — no-op in production builds.
+  const logDiag =
+    process.env.NODE_ENV !== 'production'
+      ? (msg: string, data?: unknown) => console.warn('[segmentation-diag]', msg, data)
+      : (_msg: string, _data?: unknown) => {};
 
   return {
     /**
@@ -176,6 +183,115 @@ function modeFactory({ modeConfiguration }) {
         'Threshold',
       ]);
 
+      const moveBrushPixelsToRenderSlice = (
+        segmentationId: string,
+        rawSlices: number[] | undefined,
+        renderSlices: number[] | undefined,
+        segmentIndex?: number
+      ) => {
+        const rawSlice = rawSlices?.[0];
+        const renderSlice = renderSlices?.[0];
+        if (
+          rawSlice === undefined ||
+          renderSlice === undefined ||
+          rawSlice === renderSlice ||
+          rawSlice < 0 ||
+          renderSlice < 0
+        ) {
+          return false;
+        }
+
+        const segmentation = cstSegmentation.state.getSegmentation(segmentationId);
+        const volumeId = (
+          segmentation?.representationData?.[toolEnums.SegmentationRepresentations.Labelmap] as any
+        )?.volumeId;
+        const labelmapVolume = volumeId ? cache.getVolume(volumeId) : null;
+        const dimensions =
+          (labelmapVolume as any)?.dimensions ||
+          (labelmapVolume as any)?.imageData?.getDimensions?.();
+        const width = dimensions?.[0] || 0;
+        const height = dimensions?.[1] || 0;
+        const numberOfSlices = dimensions?.[2] || 0;
+        const sliceLength = width * height;
+        const scalarData = (labelmapVolume as any)?.voxelManager?.getScalarData?.();
+        const imageIds = (labelmapVolume as any)?.imageIds ?? [];
+        const getImageScalarData = (imageId?: string) => {
+          if (!imageId) {
+            return undefined;
+          }
+
+          try {
+            return cache.getImage(imageId)?.voxelManager?.getScalarData?.();
+          } catch {
+            return undefined;
+          }
+        };
+        const rawImageScalarData = getImageScalarData(imageIds[rawSlice]);
+        const renderImageScalarData = getImageScalarData(imageIds[renderSlice]);
+
+        if (
+          !sliceLength ||
+          rawSlice >= numberOfSlices ||
+          renderSlice >= numberOfSlices ||
+          (!scalarData && (!rawImageScalarData || !renderImageScalarData))
+        ) {
+          return false;
+        }
+
+        const rawOffset = rawSlice * sliceLength;
+        const renderOffset = renderSlice * sliceLength;
+        let moved = false;
+        let movedCount = 0;
+        const readRawValue = (index: number) =>
+          rawImageScalarData?.[index] ?? scalarData?.[rawOffset + index] ?? 0;
+
+        for (let i = 0; i < sliceLength; i++) {
+          const value = readRawValue(i);
+          if (value === 0) {
+            continue;
+          }
+          if (segmentIndex !== undefined && value !== segmentIndex) {
+            continue;
+          }
+
+          if (renderImageScalarData) {
+            renderImageScalarData[i] = value;
+          }
+          if (rawImageScalarData) {
+            rawImageScalarData[i] = 0;
+          }
+          if (scalarData) {
+            scalarData[renderOffset + i] = value;
+            scalarData[rawOffset + i] = 0;
+          }
+          moved = true;
+          movedCount += 1;
+        }
+
+        if (moved) {
+          (labelmapVolume as any).imageData?.modified?.();
+          (labelmapVolume as any).invalidate?.();
+          logDiag('moved brush pixels', {
+            segmentationId,
+            segmentIndex,
+            rawSlice,
+            renderSlice,
+            movedCount,
+            volumeId,
+          });
+        } else {
+          logDiag('no brush pixels moved', {
+            segmentationId,
+            segmentIndex,
+            rawSlice,
+            renderSlice,
+            volumeId,
+          });
+        }
+
+        return moved;
+      };
+
       // Auto-activate contour editing when the first segment is added so the
       // user can start drawing without an extra click.
       let hasAutoActivatedContour = false;
@@ -229,6 +345,11 @@ function modeFactory({ modeConfiguration }) {
           return;
         }
 
+        logDiag('tool:contour', {
+          eventReferencedImageId: referencedImageId,
+          pointCount: worldPolyline.length,
+        });
+
         void writeContourToOhifLabelmap({
           servicesManager,
           viewportId: activeViewportId,
@@ -246,17 +367,14 @@ function modeFactory({ modeConfiguration }) {
       const scheduleAutosave = (
         segmentationId: string,
         saveScope: SaveScope,
-        reason: string
+        reason: string,
+        saveOptions: Partial<SaveOptions> = {}
       ) => {
-        if (
-          _restoreInProgressSegmentationIds.has(segmentationId) ||
-          !_autosaveArmedSegmentationIds.has(segmentationId)
-        ) {
+        if (!canAutosave(segmentationId)) {
           logSegmentationTimeline('autosave:ignored', {
             segmentationId,
             reason,
-            restoreInProgress: _restoreInProgressSegmentationIds.has(segmentationId),
-            autosaveArmed: _autosaveArmedSegmentationIds.has(segmentationId),
+            phase: getPhase(segmentationId),
           });
           return;
         }
@@ -265,12 +383,32 @@ function modeFactory({ modeConfiguration }) {
           segmentationId,
           reason,
           saveScope,
+          modifiedSlicesToUse: saveOptions.modifiedSlicesToUse,
+        });
+        logDiag('autosave scheduled', {
+          segmentationId,
+          reason,
+          saveScope,
+          modifiedSlicesToUse: saveOptions.modifiedSlicesToUse,
         });
         updatePersistenceStatus(
           servicesManager,
           'dirty',
           'Unsaved segmentation changes. Saving will start automatically.'
         );
+
+        const pendingOptions = _saveDebounceOptions.get(segmentationId);
+        const mergedModifiedSlices = Array.from(
+          new Set([
+            ...(pendingOptions?.modifiedSlicesToUse ?? []),
+            ...(saveOptions.modifiedSlicesToUse ?? []),
+          ])
+        );
+        _saveDebounceOptions.set(segmentationId, {
+          ...pendingOptions,
+          ...saveOptions,
+          ...(mergedModifiedSlices.length ? { modifiedSlicesToUse: mergedModifiedSlices } : {}),
+        });
 
         const existing = _saveDebounceTimers.get(segmentationId);
         if (existing) {
@@ -281,12 +419,34 @@ function modeFactory({ modeConfiguration }) {
           segmentationId,
           setTimeout(() => {
             _saveDebounceTimers.delete(segmentationId);
+            if (!canAutosave(segmentationId)) {
+              _saveDebounceOptions.delete(segmentationId);
+              logSegmentationTimeline('autosave:debounce-ignored', {
+                segmentationId,
+                reason,
+                saveScope,
+                phase: getPhase(segmentationId),
+              });
+              return;
+            }
             logSegmentationTimeline('autosave:debounce-fired', {
               segmentationId,
               reason,
               saveScope,
             });
-            void saveAllFrames(segmentationId, servicesManager, saveScope).catch(error => {
+            const pendingSaveOptions = _saveDebounceOptions.get(segmentationId) ?? {};
+            _saveDebounceOptions.delete(segmentationId);
+            logDiag('autosave fired', {
+              segmentationId,
+              reason,
+              saveScope,
+              modifiedSlicesToUse: pendingSaveOptions.modifiedSlicesToUse,
+            });
+            void saveAllFrames(segmentationId, servicesManager, saveScope, {
+              deleteEmptyFrames: false,
+              writeEmptyPlaceholder: false,
+              ...pendingSaveOptions,
+            }).catch(error => {
               console.error('[segmentation-mode] autosave:error', {
                 segmentationId,
                 reason,
@@ -306,15 +466,58 @@ function modeFactory({ modeConfiguration }) {
                 'Segmentation Save Requires Login'
               );
             });
-          }, 500)
+          }, 1500)
         );
       };
 
       // Persist labelmap pixel data whenever a brush stroke modifies it
       const { unsubscribe: unsubDataModified } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_DATA_MODIFIED,
-        ({ segmentationId }: { segmentationId: string }) => {
-          scheduleAutosave(segmentationId, 'current-timepoint', 'data-modified');
+        ({
+          segmentationId,
+          modifiedSlicesToUse,
+          segmentIndex,
+        }: {
+          segmentationId: string;
+          modifiedSlicesToUse?: number[];
+          segmentIndex?: number;
+        }) => {
+          const viewportId = viewportGridService.getState().activeViewportId;
+          const identity = viewportId
+            ? resolveSliceIdentity(viewportId, segmentationId, {
+                cornerstoneViewportService,
+                viewportGridService,
+                displaySetService,
+              })
+            : null;
+          const k = identity?.k ?? -1;
+          const rendererModifiedSlices = k >= 0 ? [k] : modifiedSlicesToUse;
+          const movedBrushPixels = moveBrushPixelsToRenderSlice(
+            segmentationId,
+            modifiedSlicesToUse,
+            rendererModifiedSlices,
+            segmentIndex
+          );
+
+          if (identity) {
+            markDirty(segmentationId, identity.timePointIndex);
+          }
+
+          logDiag('tool:brush-or-eraser', {
+            viewportId,
+            frameKey: identity?.frameKey,
+            displaySetIndex: identity?.displaySetIndex,
+            k,
+            segmentationId,
+            segmentIndex,
+            modifiedSlicesToUse,
+            rendererModifiedSlices,
+            movedBrushPixels,
+          });
+
+          scheduleAutosave(segmentationId, 'current-timepoint', 'data-modified', {
+            modifiedSlicesToUse: rendererModifiedSlices,
+          });
         }
       );
       _unsubscribeSegmentDataModified = unsubDataModified;
@@ -340,14 +543,14 @@ function modeFactory({ modeConfiguration }) {
       const { unsubscribe: unsubSegAdded } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_ADDED,
         ({ segmentationId }: { segmentationId: string }) => {
-          if (_autoRestoredSegmentationIds.has(segmentationId)) return;
-          _restoreInProgressSegmentationIds.add(segmentationId);
-          _autosaveArmedSegmentationIds.delete(segmentationId);
+          if (getPhase(segmentationId) === 'armed') return;
+          setPhase(segmentationId, 'restoring');
           logSegmentationTimeline('segmentationAdded:begin-restore', {
             segmentationId,
           });
           void restoreFrames(segmentationId, servicesManager)
             .catch(error => {
+              setPhase(segmentationId, 'error');
               console.error('[segmentation-mode] restore:error', {
                 segmentationId,
                 error,
@@ -366,325 +569,40 @@ function modeFactory({ modeConfiguration }) {
               );
             })
             .finally(() => {
-              _restoreInProgressSegmentationIds.delete(segmentationId);
-              _autosaveArmedSegmentationIds.add(segmentationId);
+              if (getPhase(segmentationId) === 'restoring') {
+                setPhase(segmentationId, 'armed');
+              }
               logSegmentationTimeline('segmentationAdded:restore-finished', {
                 segmentationId,
-                autosaveArmed: true,
+                phase: getPhase(segmentationId),
               });
             });
         }
       );
       _unsubscribeSegmentationAdded = unsubSegAdded;
 
-      // Auto-create a labelmap once the active viewport has usable display-set data.
-      // `VIEWPORT_VOLUMES_CHANGED` is sufficient for volume paths, but stack/initial
-      // selected-instance entry can miss it, so we also listen to `VIEWPORT_DATA_CHANGED`
-      // and run one immediate attempt after subscriptions are installed.
-      const _autoCreateDoneDisplaySetUIDs = new Set<string>();
-      const _autoCreateInProgressDisplaySetUIDs = new Set<string>();
-      const tryAutoCreateSegmentationFromBackend = async () => {
-        const viewportId = viewportGridService.getActiveViewportId?.();
-        if (!viewportId) return;
-        const { viewports } = viewportGridService.getState();
-        const viewport = viewports?.get(viewportId);
-        if (!viewport?.displaySetInstanceUIDs?.length) return;
+      // Auto-create a labelmap once a viewport has usable display-set data.
+      // We scan the current grid instead of depending only on the active viewport,
+      // because initial layout mount can happen before a click establishes one.
+      const _tryAutoCreateForViewport = (viewportId: string) =>
+        tryAutoCreateSegmentationFromBackend(viewportId, servicesManager);
 
-        const displaySetInstanceUID = viewport.displaySetInstanceUIDs[0];
-        if (
-          _autoCreateDoneDisplaySetUIDs.has(displaySetInstanceUID) ||
-          _autoCreateInProgressDisplaySetUIDs.has(displaySetInstanceUID)
-        ) {
-          return;
-        }
-
-        const viewportRepresentations =
-          segmentationService.getSegmentationRepresentations?.(viewportId) ?? [];
-        if (viewportRepresentations.length) {
-          _autoCreateDoneDisplaySetUIDs.add(displaySetInstanceUID);
-          return;
-        }
-
-        const displaySet = displaySetService?.getDisplaySetByUID(displaySetInstanceUID);
-        if (!displaySet) return;
-        const hasDisplaySetFrames =
-          (displaySet.imageIds?.length || 0) > 0 ||
-          (displaySet.dynamicVolumeInfo?.timePoints?.length || 0) > 0;
-        if (!hasDisplaySetFrames) {
-          return;
-        }
-
-        _autoCreateInProgressDisplaySetUIDs.add(displaySetInstanceUID);
-
-        logSegmentationTimeline('viewportVolumesChanged:auto-create-begin', {
-          viewportId,
-          displaySetInstanceUID,
-          isDynamicVolume: Boolean(displaySet.isDynamicVolume),
-          imageIdCount: displaySet.imageIds?.length || 0,
-          timePointCount: displaySet.dynamicVolumeInfo?.timePoints?.length || 0,
-        });
-
-        try {
-          const studyInstanceUID = displaySet.StudyInstanceUID;
-          const seriesInstanceUID = displaySet.SeriesInstanceUID;
-
-          // Fetch saved frames from backend before creating labelmap
-          let saved: Awaited<ReturnType<typeof loadSegFrames>> = [];
-          try {
-            if (studyInstanceUID && seriesInstanceUID) {
-              updatePersistenceStatus(
-                servicesManager,
-                'loading',
-                'Checking backend for saved segmentation...'
-              );
-              saved = await loadSegFrames(studyInstanceUID, seriesInstanceUID);
-              logSegmentationTimeline('viewportVolumesChanged:backend-prefetch-done', {
-                viewportId,
-                studyInstanceUID,
-                seriesInstanceUID,
-                savedCount: saved.length,
-              });
-            }
-          } catch (err) {
-            console.error('[segmentation-mode] failed to pre-fetch saved frames', err);
-            updatePersistenceStatus(
-              servicesManager,
-              'error',
-              err instanceof Error
-                ? err.message
-                : 'Failed to check saved segmentation state from backend.'
-            );
-          }
-
-          // Build merged label map and segment config from saved data
-          const mergedLabelMap: Record<
-            number,
-            { labelId: string; labelName: string; labelColor: string; labelLocked?: boolean }
-          > = {};
-          const persistedSegmentationLabel =
-            saved.find(frame => frame.segmentationLabel?.trim())?.segmentationLabel || undefined;
-          for (const frame of saved) {
-            if (frame.labelMap) Object.assign(mergedLabelMap, frame.labelMap);
-          }
-          const sortedSegIndices = Object.keys(mergedLabelMap)
-            .map(Number)
-            .sort((a, b) => a - b);
-          const segmentsConfig: Record<number, { label: string; active: boolean; isLocked?: boolean }> = {};
-          for (const idx of sortedSegIndices) {
-            segmentsConfig[idx] = {
-              label: mergedLabelMap[idx].labelName,
-              active: idx === sortedSegIndices[0],
-              isLocked: Boolean(mergedLabelMap[idx].labelLocked),
-            };
-          }
-
-          // Pre-register the ID so SEGMENTATION_ADDED skips restoreFrames for this one
-          const segmentationId = crypto.randomUUID();
-          _autoRestoredSegmentationIds.add(segmentationId);
-
-          let generatedId: string | undefined;
-          try {
-            generatedId = await segmentationService.createLabelmapForDisplaySet(displaySet, {
-              segmentationId,
-              label: persistedSegmentationLabel,
-              segments: segmentsConfig, // {} → zero segments when no saved data
-            });
-            logSegmentationTimeline('viewportVolumesChanged:labelmap-created', {
-              viewportId,
-              segmentationId: generatedId,
-            });
-          } catch (err) {
-            _autoRestoredSegmentationIds.delete(segmentationId);
-            console.error('[segmentation-mode] createLabelmapForDisplaySet failed', err);
-            return;
-          }
-
-          _restoreInProgressSegmentationIds.add(generatedId);
-          _autosaveArmedSegmentationIds.delete(generatedId);
-
-          try {
-            await segmentationService.addSegmentationRepresentation(viewportId, {
-              segmentationId: generatedId,
-              type: toolEnums.SegmentationRepresentations.Labelmap,
-            });
-            logSegmentationTimeline('viewportVolumesChanged:representation-added', {
-              viewportId,
-              segmentationId: generatedId,
-              hasDynamicSegmentation:
-                segmentationService.hasDynamicSegmentation?.(generatedId) || false,
-            });
-          } catch (err) {
-            console.error('[segmentation-mode] addSegmentationRepresentation failed', err);
-            logSegmentationTimeline('viewportVolumesChanged:representation-add-failed', {
-              viewportId,
-              segmentationId: generatedId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-
-          if (!saved.length) {
-            updatePersistenceStatus(
-              servicesManager,
-              'synced',
-              'No saved segmentation found yet. New edits will autosave here.'
-            );
-            _restoreInProgressSegmentationIds.delete(generatedId);
-            _autosaveArmedSegmentationIds.add(generatedId);
-            logSegmentationTimeline('viewportVolumesChanged:no-backend-data', {
-              segmentationId: generatedId,
-              autosaveArmed: true,
-            });
-            return;
-          }
-
-          // Write restored pixel data into the images the renderer actually reads.
-          // For volume viewports, handleVolumeViewport sets representationData.Labelmap.volumeId
-          // to a derived volume whose .imageIds are the images that
-          // updateTextureImagesUsingVoxelManager samples. For dynamic (4D) datasets these
-          // are DIFFERENT from the per-frame images created by createAndCacheDerivedLabelmapImages,
-          // so we must write into the volume's own images.
-          const savedByKey = new Map(saved.map(f => [f.frameKey, f]));
-          const modifiedIndices: number[] = [];
-          const segState2 = segmentationService.getSegmentation(generatedId);
-          const labelmapData2 = segState2?.representationData?.[
-            toolEnums.SegmentationRepresentations.Labelmap
-          ] as { imageIds?: string[]; referencedImageIds?: string[] } | undefined;
-          const { imageIds: labelmapImageIds2, referencedImageIds: referencedImageIds2 } =
-            getSanitizedLabelmapFrames(labelmapData2);
-
-          const restoredTimePoints = segmentationService.restoreDynamicSegmentationTimePointBuffers?.(
-            generatedId,
-            referencedImageIds2,
-            savedByKey
-          );
-          logSegmentationTimeline('viewportVolumesChanged:restore-attempted', {
-            segmentationId: generatedId,
-            referencedImageCount: referencedImageIds2.length,
-            restoredTimePoints,
-            hasDynamicSegmentation:
-              segmentationService.hasDynamicSegmentation?.(generatedId) || false,
-          });
-
-          if (segmentationService.hasDynamicSegmentation?.(generatedId)) {
-            if (restoredTimePoints?.length) {
-              console.debug('[segmentation-mode] autoCreate:applied-timepoints', {
-                segmentationId: generatedId,
-                timePoints: restoredTimePoints,
-              });
-            }
-          } else {
-            const csSeg = cstSegmentation.state.getSegmentation(generatedId);
-            const restoreVolumeId = (csSeg?.representationData?.Labelmap as any)?.volumeId;
-            const restoreVolume = restoreVolumeId ? cache.getVolume(restoreVolumeId) : null;
-
-            if (restoreVolume) {
-              modifiedIndices.push(
-                ...applySavedFramesToLabelmapVolume(
-                  restoreVolume,
-                  savedByKey,
-                  generatedId,
-                  'autoCreate'
-                )
-              );
-            } else {
-              // Stack-viewport fallback: write into per-frame derived images.
-              for (let i = 0; i < labelmapImageIds2.length; i++) {
-                const referencedImageId = referencedImageIds2[i];
-                if (!referencedImageId) continue;
-                const stableFrameKey = getStableFrameKey(referencedImageId) || referencedImageId;
-                const frame =
-                  savedByKey.get(stableFrameKey) || savedByKey.get(referencedImageId);
-                if (!frame) continue;
-                const labelmapImage =
-                  cache.getImage(labelmapImageIds2[i]) ||
-                  (await imageLoader.loadAndCacheImage(labelmapImageIds2[i]));
-                const scalarData = labelmapImage?.voxelManager?.getScalarData?.();
-                if (!scalarData || scalarData.length !== frame.maskData.length) continue;
-                scalarData.set(frame.maskData);
-                modifiedIndices.push(i);
-              }
-            }
-          }
-
-          // Set segment colors after representation is registered
-          for (const idx of sortedSegIndices) {
-            const entry = mergedLabelMap[idx];
-            try {
-              segmentationService.setSegmentColor(
-                viewportId,
-                generatedId,
-                idx,
-                hexToRgba255(entry.labelColor || '#FFFFFF')
-              );
-            } catch {
-              // best-effort
-            }
-          }
-
-          if (modifiedIndices.length) {
-            // Do NOT pass modifiedIndices — see restoreFrames for the full explanation.
-            cstSegmentation.triggerSegmentationEvents.triggerSegmentationDataModified(generatedId);
-            updatePersistenceStatus(
-              servicesManager,
-              'synced',
-              `Loaded ${modifiedIndices.length} saved segmentation frame${
-                modifiedIndices.length === 1 ? '' : 's'
-              } from backend.`
-            );
-          } else if (restoredTimePoints?.length) {
-            cstSegmentation.triggerSegmentationEvents.triggerSegmentationDataModified(generatedId);
-            updatePersistenceStatus(
-              servicesManager,
-              'synced',
-              `Loaded saved segmentation for ${restoredTimePoints.length} timepoint${
-                restoredTimePoints.length === 1 ? '' : 's'
-              } from backend.`
-            );
-          } else {
-            updatePersistenceStatus(
-              servicesManager,
-              'synced',
-              'Saved segmentation metadata loaded. No pixels were restored into the active view.'
-            );
-          }
-          _restoreInProgressSegmentationIds.delete(generatedId);
-          _autosaveArmedSegmentationIds.add(generatedId);
-          logSegmentationTimeline('viewportVolumesChanged:init-finished', {
-            segmentationId: generatedId,
-            autosaveArmed: true,
-            modifiedIndices,
-            restoredTimePoints,
-          });
-          _autoCreateDoneDisplaySetUIDs.add(displaySetInstanceUID);
-        } finally {
-          _autoCreateInProgressDisplaySetUIDs.delete(displaySetInstanceUID);
-        }
-      };
-
-      const { unsubscribe: unsubViewportVolumes } = cornerstoneViewportService.subscribe(
-        cornerstoneViewportService.EVENTS.VIEWPORT_VOLUMES_CHANGED,
-        () => {
-          void tryAutoCreateSegmentationFromBackend();
-        }
-      );
       const { unsubscribe: unsubViewportData } = cornerstoneViewportService.subscribe(
         cornerstoneViewportService.EVENTS.VIEWPORT_DATA_CHANGED,
-        () => {
-          void tryAutoCreateSegmentationFromBackend();
+        (event: any) => {
+          logSegmentationTimeline('event:viewport-data-changed', event);
+          const viewportId = event?.viewportId ?? event?.detail?.viewportId;
+          if (viewportId) {
+            void _tryAutoCreateForViewport(viewportId);
+          }
         }
       );
-      const { unsubscribe: unsubActiveViewport } = viewportGridService.subscribe(
-        viewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED,
-        () => {
-          void tryAutoCreateSegmentationFromBackend();
-        }
-      );
-      _unsubscribeViewportDataChanged = () => {
-        unsubViewportVolumes();
-        unsubViewportData();
-        unsubActiveViewport();
-      };
-      void tryAutoCreateSegmentationFromBackend();
+      _unsubscribeViewportDataChanged = unsubViewportData;
+
+      const { viewports: initialViewports } = viewportGridService.getState();
+      for (const [viewportId] of initialViewports ?? []) {
+        void _tryAutoCreateForViewport(viewportId);
+      }
 
       _onKeyDown = (evt: KeyboardEvent) => {
         const isSaveShortcut = (evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === 's';
@@ -709,7 +627,12 @@ function modeFactory({ modeConfiguration }) {
           clearTimeout(existing);
           _saveDebounceTimers.delete(segmentationId);
         }
+        _saveDebounceOptions.delete(segmentationId);
 
+        logDiag('manual full save fired', {
+          segmentationId,
+          saveScope: 'all-timepoints',
+        });
         void saveAllFrames(segmentationId, servicesManager, 'all-timepoints')
           .then(() => {})
           .catch(error => {
@@ -755,15 +678,14 @@ function modeFactory({ modeConfiguration }) {
       _unsubscribeSegmentationAdded = null;
       _unsubscribeViewportDataChanged?.();
       _unsubscribeViewportDataChanged = null;
-      _autoRestoredSegmentationIds.clear();
-      _restoreInProgressSegmentationIds.clear();
-      _autosaveArmedSegmentationIds.clear();
+      destroyAdapterState();
       if (_onKeyDown) {
         window.removeEventListener('keydown', _onKeyDown);
         _onKeyDown = null;
       }
       _saveDebounceTimers.forEach(t => clearTimeout(t));
       _saveDebounceTimers.clear();
+      _saveDebounceOptions.clear();
 
       uiDialogService.hideAll();
       uiModalService.hide();
@@ -819,6 +741,7 @@ function modeFactory({ modeConfiguration }) {
               rightPanels: [
                 cornerstone.panelTool,
                 cornerstone.measurements,
+                oviLabs.segmentationExportPanel,
               ],
               rightPanelResizable: true,
               // leftPanelClosed: true,

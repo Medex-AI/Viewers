@@ -50,6 +50,55 @@ export const deleteSegmentationFrame = async ({
   });
 };
 
+// ─── Batch / beacon helpers ──────────────────────────────────────────────────
+
+interface BatchFrame {
+  studyInstanceUID: string;
+  seriesInstanceUID: string;
+  frameKey: string;
+  maskData: Uint8Array;
+  width: number;
+  height: number;
+}
+
+/**
+ * Save multiple segmentation frames in a single HTTP request.
+ * Converts Uint8Array maskData to plain number arrays for JSON serialisation.
+ */
+export async function batchSaveSegmentationFrames(frames: BatchFrame[]): Promise<void> {
+  const token = localStorage.getItem('token');
+  const response = await fetch('/api/segmentation-frames/batch', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(
+      frames.map(f => ({
+        ...f,
+        maskData: Array.from(f.maskData),
+      }))
+    ),
+  });
+  if (!response.ok) {
+    throw new Error(`Batch save failed: ${response.status} ${response.statusText}`);
+  }
+}
+
+/**
+ * Best-effort synchronous exit flush using `navigator.sendBeacon`.
+ * Returns the result of `sendBeacon` (false if the UA rejected the request).
+ * Used in `beforeunload` / `onModeExit` to flush unsaved frames without
+ * keeping the page alive.
+ */
+export function sendBeaconSaveFrames(frames: BatchFrame[]): boolean {
+  const payload = JSON.stringify(frames.map(f => ({ ...f, maskData: Array.from(f.maskData) })));
+  return navigator.sendBeacon(
+    '/api/segmentation-frames/batch',
+    new Blob([payload], { type: 'application/json' })
+  );
+}
+
 export const loadSegmentationFrames = async (
   seriesInstanceUID: string,
   studyInstanceUID?: string,
