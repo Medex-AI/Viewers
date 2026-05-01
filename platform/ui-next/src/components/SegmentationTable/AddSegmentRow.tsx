@@ -56,7 +56,7 @@ export const AddSegmentRow: React.FC<{ children?: React.ReactNode }> = ({ childr
             onClick={() => onSegmentAdd(segmentationId)}
           >
             <Icons.Add />
-            Add Segment
+            Add Label
           </Button>
         ) : null}
       </div>

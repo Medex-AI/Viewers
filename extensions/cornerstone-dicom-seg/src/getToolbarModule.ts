@@ -68,5 +68,21 @@ export function getToolbarModule({ servicesManager }: withAppTypes) {
         };
       },
     },
+    {
+      name: 'evaluate.medex.manualContourMode',
+      evaluate: ({ viewportId, mode = 'draw' }) => {
+        const toolGroup = toolGroupService.getToolGroupForViewport(viewportId);
+        const isManualContourToolActive =
+          toolGroup?.getActivePrimaryMouseButtonTool?.() === 'ManualContour';
+        const activeMode =
+          typeof window !== 'undefined' && (window as any).__medexManualContourMode === 'erase'
+            ? 'erase'
+            : 'draw';
+
+        return {
+          isActive: isManualContourToolActive && activeMode === mode,
+        };
+      },
+    },
   ];
 }

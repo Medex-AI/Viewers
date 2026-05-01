@@ -4,6 +4,7 @@ interface StoredSegmentation {
   seriesInstanceUID: string;
   studyInstanceUID?: string;
   model: string;
+  segmentationLabel?: string;
   frameKey: string;
   frameNumber?: number;
   width: number;
@@ -28,6 +29,7 @@ export const saveSegmentationFrame = async (payload: Omit<StoredSegmentation, 'i
     height: payload.height,
     mask_data: payload.maskData,
     label_map: payload.labelMap,
+    segmentation_label: payload.segmentationLabel,
   });
 };
 
@@ -47,6 +49,22 @@ export const deleteSegmentationFrame = async ({
     seriesUID: seriesInstanceUID,
     modelType: model,
     frameKey,
+  });
+};
+
+export const deleteSegmentationFrames = async ({
+  studyInstanceUID,
+  seriesInstanceUID,
+  model,
+}: {
+  studyInstanceUID: string;
+  seriesInstanceUID: string;
+  model: string;
+}) => {
+  await annotationApi.deleteSegmentationFrames({
+    studyUID: studyInstanceUID,
+    seriesUID: seriesInstanceUID,
+    modelType: model,
   });
 };
 
@@ -126,6 +144,7 @@ export const loadSegmentationFrames = async (
         height: entry.height,
         maskData: entry.mask_data,
         labelMap: entry.label_map || {},
+        segmentationLabel: entry.segmentation_label,
         updatedAt: 0,
       }) as StoredSegmentation
   );

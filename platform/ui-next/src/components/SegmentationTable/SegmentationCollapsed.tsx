@@ -36,6 +36,7 @@ const SegmentationCollapsedDropdownMenu = ({ children }: { children: React.React
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Segmentation Options"
             >
               <Icons.More className="h-6 w-6" />
             </Button>

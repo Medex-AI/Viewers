@@ -11,7 +11,9 @@
       "platform/i18n",
       "extensions/*",
       "modes/*",
-      "addOns/externals/*"
+      "addOns/externals/*",
+      "medex/*",
+      "specialties/*"
     ],
     "nohoist": [
       "**/html-minifier-terser"

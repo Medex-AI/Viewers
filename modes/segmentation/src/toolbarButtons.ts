@@ -359,12 +359,57 @@ const toolbarButtons: Button[] = [
       icon: 'tool-freehand-line-thin',
       label: 'Manual Contour',
       tooltip: 'Draw a closed contour and rasterize it into the active segment',
-      evaluate: {
-        name: 'evaluate.cornerstone.segmentation',
-        toolNames: ['ManualContour'],
-        disabledText: 'Create new segmentation to enable this tool.',
-      },
-      commands: 'setToolActiveToolbar',
+      evaluate: [
+        {
+          name: 'evaluate.cornerstone.segmentation',
+          toolNames: ['ManualContour'],
+          disabledText: 'Create new segmentation to enable this tool.',
+        },
+        {
+          name: 'evaluate.medex.manualContourMode',
+          mode: 'draw',
+        },
+      ],
+      commands: [
+        {
+          commandName: 'setManualContourMode',
+          commandOptions: { mode: 'draw' },
+        },
+        {
+          commandName: 'setToolActiveToolbar',
+          commandOptions: { toolName: 'ManualContour' },
+        },
+      ],
+    },
+  },
+  {
+    id: 'ManualContourEraser',
+    uiType: 'ohif.toolBoxButton',
+    props: {
+      icon: 'tool-freehand-line-dashed',
+      label: 'Contour Eraser',
+      tooltip: 'Erase the active segment inside a closed contour',
+      evaluate: [
+        {
+          name: 'evaluate.cornerstone.segmentation',
+          toolNames: ['ManualContour'],
+          disabledText: 'Create new segmentation to enable this tool.',
+        },
+        {
+          name: 'evaluate.medex.manualContourMode',
+          mode: 'erase',
+        },
+      ],
+      commands: [
+        {
+          commandName: 'setManualContourMode',
+          commandOptions: { mode: 'erase' },
+        },
+        {
+          commandName: 'setToolActiveToolbar',
+          commandOptions: { toolName: 'ManualContour' },
+        },
+      ],
     },
   },
   {

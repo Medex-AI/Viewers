@@ -7,7 +7,9 @@ interface FooterActionProps {
   className?: string;
 }
 
-interface ActionProps extends FooterActionProps {
+interface ActionProps
+  extends FooterActionProps,
+    Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'children' | 'onClick'> {
   onClick: () => void;
   className?: string;
 }
@@ -60,12 +62,13 @@ FooterAction.Right = ({ children }: FooterActionProps) => {
 FooterAction.Right.displayName = 'FooterAction.Right';
 
 // Primary action: Solid button (default)
-FooterAction.Primary = ({ children, onClick, className = 'min-w-[80px]' }: ActionProps) => {
+FooterAction.Primary = ({ children, onClick, className = 'min-w-[80px]', ...rest }: ActionProps) => {
   return (
     <Button
       variant="default"
       onClick={onClick}
       className={className}
+      {...rest}
     >
       {children}
     </Button>
@@ -74,12 +77,13 @@ FooterAction.Primary = ({ children, onClick, className = 'min-w-[80px]' }: Actio
 FooterAction.Primary.displayName = 'FooterAction.Primary';
 
 // Secondary action: Ghost button
-FooterAction.Secondary = ({ children, onClick, className = 'min-w-[80px]' }: ActionProps) => {
+FooterAction.Secondary = ({ children, onClick, className = 'min-w-[80px]', ...rest }: ActionProps) => {
   return (
     <Button
       variant="secondary"
       onClick={onClick}
       className={className}
+      {...rest}
     >
       {children}
     </Button>
@@ -88,12 +92,13 @@ FooterAction.Secondary = ({ children, onClick, className = 'min-w-[80px]' }: Act
 FooterAction.Secondary.displayName = 'FooterAction.Secondary';
 
 // Tertiary action: Ghost button with different styling
-FooterAction.Auxiliary = ({ children, onClick, className }: ActionProps) => {
+FooterAction.Auxiliary = ({ children, onClick, className, ...rest }: ActionProps) => {
   return (
     <Button
       variant="ghost"
       onClick={onClick}
       className={className}
+      {...rest}
     >
       {children}
     </Button>

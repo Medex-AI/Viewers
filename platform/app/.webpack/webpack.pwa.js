@@ -180,6 +180,12 @@ module.exports = (env, argv) => {
           secure: false,
           logLevel: 'debug',
         },
+        '/api/segmentations': {
+          target: process.env.AUTH_SERVICE_URL || 'http://127.0.0.1:5000',
+          changeOrigin: true,
+          secure: false,
+          logLevel: 'debug',
+        },
         '/dicomweb': process.env.AUTH_PROXY_TARGET || 'http://localhost:5000',
         '/dicom-web': {
           target: process.env.DICOMWEB_PROXY_TARGET || 'http://localhost:8042',

@@ -3,7 +3,6 @@ import {
   cache,
   Enums as csEnums,
   eventTarget,
-  geometryLoader,
   getEnabledElementByViewportId,
   imageLoader,
   StackViewport,
@@ -18,10 +17,18 @@ import {
   Types as cstTypes,
 } from '@cornerstonejs/tools';
 import { segmentation as csToolsSegmentationUtils } from '@cornerstonejs/tools/utilities';
-import { PubSubService, Types as OHIFTypes } from '@ohif/core';
+import { DicomMetadataStore, PubSubService, Types as OHIFTypes } from '@ohif/core';
 import i18n from '@ohif/i18n';
-import { easeInOutBell, easeInOutBellRelative } from '../../utils/transitions';
-import { mapROIContoursToRTStructData } from './RTSTRUCT/mapROIContoursToRTStructData';
+import { highlightLabelmap, highlightContour } from './segmentationHighlight';
+import {
+  buildSEGSegmentationData,
+  buildRTSegmentationData,
+} from './segmentationDisplaySetBuilders';
+import {
+  toOHIFSegmentationRepresentation,
+  type SegmentRepresentation,
+  type SegmentationRepresentation,
+} from './segmentationRepresentationMapper';
 import { SegmentationRepresentations } from '@cornerstonejs/tools/enums';
 import { addColorLUT } from '@cornerstonejs/tools/segmentation/addColorLUT';
 import { getNextColorLUTIndex } from '@cornerstonejs/tools/segmentation/getNextColorLUTIndex';
@@ -38,24 +45,10 @@ const LABELMAP = csToolsEnums.SegmentationRepresentations.Labelmap;
 const CONTOUR = csToolsEnums.SegmentationRepresentations.Contour;
 const { triggerSegmentationRenderBySegmentationId } = csToolsSegmentationUtils;
 
-export type SegmentRepresentation = {
-  segmentIndex: number;
-  color: csTypes.Color;
-  opacity: number;
-  visible: boolean;
-};
+export type { SegmentRepresentation } from './segmentationRepresentationMapper';
+export type { SegmentationRepresentation } from './segmentationRepresentationMapper';
 
 export type SegmentationData = cstTypes.Segmentation;
-
-export type SegmentationRepresentation = cstTypes.SegmentationRepresentation & {
-  viewportId: string;
-  id: string;
-  label: string;
-  styles: cstTypes.RepresentationStyle;
-  segments: {
-    [key: number]: SegmentRepresentation;
-  };
-};
 
 export type SegmentationInfo = {
   segmentation: SegmentationData;
@@ -75,6 +68,8 @@ const EVENTS = {
   SEGMENTATION_REPRESENTATION_MODIFIED: 'event::segmentation_representation_modified',
   // fired when segmentation representation is removed
   SEGMENTATION_REPRESENTATION_REMOVED: 'event::segmentation_representation_removed',
+  // fired when the active segment/class changes
+  ACTIVE_SEGMENT_MODIFIED: 'event::active_segment_modified',
   //
   // LOADING EVENTS
   // fired when the active segment is loaded in SEG or RTSTRUCT
@@ -150,9 +145,7 @@ const readVolumeScalarDataFromImages = (volume: any): Uint8Array | null => {
     return null;
   }
 
-  const slices = imageIds
-    .map(imageId => cache.getImage(imageId))
-    .filter(Boolean);
+  const slices = imageIds.map(imageId => cache.getImage(imageId)).filter(Boolean);
 
   if (slices.length !== imageIds.length) {
     return null;
@@ -210,11 +203,18 @@ const writeVolumeScalarDataToImages = (volume: any, scalarData: Uint8Array): boo
 };
 
 const logDynamicSegmentation = (phase: string, details?: Record<string, unknown>) => {
-  console.debug('[SegmentationService][dynamic]', {
-    ts: new Date().toISOString(),
-    phase,
-    ...(details || {}),
-  });
+  void phase;
+  void details;
+};
+
+const countNonZero = (data?: ArrayLike<number> | null): number => {
+  if (!data) return 0;
+
+  let count = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 0) count++;
+  }
+  return count;
 };
 
 const getSanitizedLabelmapImageIds = (segmentationId: string): string[] => {
@@ -249,6 +249,131 @@ const getSanitizedLabelmapImageIds = (segmentationId: string): string[] => {
   return sanitized.imageIds;
 };
 
+const getSanitizedLabelmapReferencedImageIds = (segmentationId: string): string[] => {
+  const segmentation = cstSegmentation.state.getSegmentation(segmentationId);
+  const labelmapData = segmentation?.representationData?.[SegmentationRepresentations.Labelmap] as
+    | { imageIds?: string[]; referencedImageIds?: string[] }
+    | undefined;
+
+  const imageIds = labelmapData?.imageIds ?? [];
+  const referencedImageIds = labelmapData?.referencedImageIds ?? [];
+  const sanitized = imageIds.reduce(
+    (acc, imageId, index) => {
+      const referencedImageId = referencedImageIds[index];
+      if (imageId && referencedImageId) {
+        acc.imageIds.push(imageId);
+        acc.referencedImageIds.push(referencedImageId);
+      }
+      return acc;
+    },
+    { imageIds: [] as string[], referencedImageIds: [] as string[] }
+  );
+
+  if (
+    labelmapData &&
+    (sanitized.imageIds.length !== imageIds.length ||
+      sanitized.referencedImageIds.length !== referencedImageIds.length)
+  ) {
+    labelmapData.imageIds = sanitized.imageIds;
+    labelmapData.referencedImageIds = sanitized.referencedImageIds;
+  }
+
+  return sanitized.referencedImageIds;
+};
+
+const toVector3 = (value: unknown): [number, number, number] | null => {
+  if (!value) return null;
+
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split('\\')
+      : null;
+
+  if (!values || values.length < 3) return null;
+
+  const vector = values.slice(0, 3).map(Number);
+  return vector.every(Number.isFinite) ? (vector as [number, number, number]) : null;
+};
+
+const dot = (a: [number, number, number], b: [number, number, number]): number =>
+  a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+const cross = (
+  a: [number, number, number],
+  b: [number, number, number]
+): [number, number, number] => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+
+const getImagePlaneGeometry = (imageId: string) => {
+  const imagePlane = metaData.get('imagePlaneModule', imageId) || {};
+  const instance = DicomMetadataStore.getInstanceByImageId(imageId) || {};
+  const rowCosines =
+    toVector3(imagePlane.rowCosines) ||
+    toVector3(imagePlane.rowCosine) ||
+    toVector3(imagePlane.imageOrientationPatient?.slice?.(0, 3)) ||
+    toVector3(instance.ImageOrientationPatient?.slice?.(0, 3));
+  const columnCosines =
+    toVector3(imagePlane.columnCosines) ||
+    toVector3(imagePlane.columnCosine) ||
+    toVector3(imagePlane.imageOrientationPatient?.slice?.(3, 6)) ||
+    toVector3(instance.ImageOrientationPatient?.slice?.(3, 6));
+  const imagePositionPatient =
+    toVector3(imagePlane.imagePositionPatient) ||
+    toVector3(imagePlane.imagePosition) ||
+    toVector3(instance.ImagePositionPatient);
+
+  if (!rowCosines || !columnCosines || !imagePositionPatient) {
+    return null;
+  }
+
+  return {
+    rowCosines,
+    columnCosines,
+    normal: cross(rowCosines, columnCosines),
+    imagePositionPatient,
+  };
+};
+
+const hasReconstructableImageGeometry = (imageIds: string[]): boolean => {
+  if (imageIds.length < 2) {
+    return true;
+  }
+
+  const geometries = imageIds.map(getImagePlaneGeometry);
+  if (geometries.some(geometry => !geometry)) {
+    return true;
+  }
+
+  const [first] = geometries;
+  const orientationTolerance = 0.999;
+  const positionTolerance = 0.01;
+  const slicePositions = new Set<string>();
+
+  for (const geometry of geometries) {
+    if (
+      Math.abs(dot(first.rowCosines, geometry.rowCosines)) < orientationTolerance ||
+      Math.abs(dot(first.columnCosines, geometry.columnCosines)) < orientationTolerance
+    ) {
+      return false;
+    }
+
+    const slicePosition = dot(geometry.imagePositionPatient, first.normal);
+    const positionKey = (Math.round(slicePosition / positionTolerance) * positionTolerance).toFixed(
+      2
+    );
+    if (slicePositions.has(positionKey)) {
+      return false;
+    }
+    slicePositions.add(positionKey);
+  }
+
+  return true;
+};
+
 class SegmentationService extends PubSubService {
   static REGISTRATION = {
     name: 'segmentationService',
@@ -272,6 +397,8 @@ class SegmentationService extends PubSubService {
       numTimePoints: number;
       currentTimePoint: number;
       scalarBuffers: Uint8Array[];
+      restoredTimePoints?: Set<number>;
+      restoreWriteProtectedUntil?: number;
     }
   >();
   private _dynamicVolumeListenerRegistered = false;
@@ -370,6 +497,117 @@ class SegmentationService extends PubSubService {
     return true;
   }
 
+  private _clearSegmentFromDynamicBuffers(segmentationId: string, segmentIndex: number): boolean {
+    const state = this._dynamicSegmentationMap.get(segmentationId);
+    if (!state) {
+      return false;
+    }
+
+    let cleared = false;
+    for (const buffer of state.scalarBuffers) {
+      if (!buffer) {
+        continue;
+      }
+      for (let i = 0; i < buffer.length; i++) {
+        if (buffer[i] === segmentIndex) {
+          buffer[i] = 0;
+          cleared = true;
+        }
+      }
+    }
+
+    logDynamicSegmentation('clearSegmentFromDynamicBuffers', {
+      segmentationId,
+      segmentIndex,
+      cleared,
+      numTimePoints: state.numTimePoints,
+    });
+
+    return cleared;
+  }
+
+  private _clearSegmentFromLabelmapData(segmentationId: string, segmentIndex: number): boolean {
+    const segmentation = this.getCornerstoneSegmentation(segmentationId) as any;
+    const labelmapData = segmentation?.representationData?.[LABELMAP];
+    if (!labelmapData) {
+      return false;
+    }
+
+    let cleared = false;
+    const clearScalarData = (data?: ArrayLike<number> | null) => {
+      if (!data) {
+        return;
+      }
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] === segmentIndex) {
+          (data as any)[i] = 0;
+          cleared = true;
+        }
+      }
+    };
+
+    for (const imageId of labelmapData.imageIds || []) {
+      clearScalarData(cache.getImage(imageId)?.voxelManager?.getScalarData?.());
+    }
+
+    if (labelmapData.volumeId) {
+      clearScalarData((cache.getVolume(labelmapData.volumeId) as any)?.voxelManager?.getScalarData?.());
+    }
+
+    return cleared;
+  }
+
+  public restoreDynamicSegmentationCurrentTimePointBuffer(segmentationId: string): boolean {
+    const state = this._dynamicSegmentationMap.get(segmentationId);
+    if (!state) {
+      return false;
+    }
+
+    const labelmapVolume = cache.getVolume(state.labelmapVolumeId) as any;
+    const currentBuffer = state.scalarBuffers[state.currentTimePoint];
+    if (!labelmapVolume || !currentBuffer) {
+      logDynamicSegmentation('restoreCurrentTimePointBuffer:skipped', {
+        segmentationId,
+        hasLabelmapVolume: Boolean(labelmapVolume),
+        hasCurrentBuffer: Boolean(currentBuffer),
+        currentTimePoint: state.currentTimePoint,
+      });
+      return false;
+    }
+
+    const liveBefore = readVolumeScalarDataFromImages(labelmapVolume);
+    logDynamicSegmentation('restoreCurrentTimePointBuffer:before-write', {
+      segmentationId,
+      labelmapVolumeId: state.labelmapVolumeId,
+      currentTimePoint: state.currentTimePoint,
+      bufferLength: currentBuffer.length,
+      bufferNonZero: countNonZero(currentBuffer),
+      liveLength: liveBefore?.length || 0,
+      liveNonZero: countNonZero(liveBefore),
+    });
+
+    if (!writeVolumeScalarDataToImages(labelmapVolume, currentBuffer)) {
+      logDynamicSegmentation('restoreCurrentTimePointBuffer:write-failed', {
+        segmentationId,
+        labelmapVolumeId: state.labelmapVolumeId,
+        currentTimePoint: state.currentTimePoint,
+      });
+      return false;
+    }
+
+    labelmapVolume.invalidate();
+    triggerSegmentationRenderBySegmentationId(segmentationId);
+    const liveAfter = readVolumeScalarDataFromImages(labelmapVolume);
+    logDynamicSegmentation('restoreCurrentTimePointBuffer:done', {
+      segmentationId,
+      labelmapVolumeId: state.labelmapVolumeId,
+      currentTimePoint: state.currentTimePoint,
+      liveLength: liveAfter?.length || 0,
+      liveNonZero: countNonZero(liveAfter),
+    });
+    return true;
+  }
+
   public restoreDynamicSegmentationTimePointBuffers(
     segmentationId: string,
     referencedImageIds: string[],
@@ -442,7 +680,17 @@ class SegmentationService extends PubSubService {
       }
     }
 
+    state.restoredTimePoints = new Set(modifiedTimePoints);
+    state.restoreWriteProtectedUntil = Date.now() + 3000;
+
     if (modifiedTimePoints.has(state.currentTimePoint)) {
+      logDynamicSegmentation('restoreTimePointBuffers:before-active-write', {
+        segmentationId,
+        labelmapVolumeId: state.labelmapVolumeId,
+        currentTimePoint: state.currentTimePoint,
+        bufferLength: state.scalarBuffers[state.currentTimePoint]?.length || 0,
+        bufferNonZero: countNonZero(state.scalarBuffers[state.currentTimePoint]),
+      });
       if (
         !writeVolumeScalarDataToImages(labelmapVolume, state.scalarBuffers[state.currentTimePoint])
       ) {
@@ -462,14 +710,13 @@ class SegmentationService extends PubSubService {
       numTimePoints: state.numTimePoints,
       modifiedTimePoints: Array.from(modifiedTimePoints),
       currentTimePoint: state.currentTimePoint,
+      liveNonZero: countNonZero(readVolumeScalarDataFromImages(labelmapVolume)),
     });
 
     return Array.from(modifiedTimePoints).sort((a, b) => a - b);
   }
 
-  public async getDynamicSegmentationFrameSnapshots(
-    segmentationId: string
-  ): Promise<
+  public async getDynamicSegmentationFrameSnapshots(segmentationId: string): Promise<
     Array<{
       referencedImageId: string;
       frameNumber: number;
@@ -907,140 +1154,32 @@ class SegmentationService extends PubSubService {
     }
   ): Promise<string> {
     const { type } = options;
-    let { segmentationId } = options;
-    const { labelMapImages } = segDisplaySet;
 
     if (type !== LABELMAP) {
       throw new Error('Only labelmap type is supported for SEG display sets right now');
     }
 
-    if (!labelMapImages || !labelMapImages.length) {
-      throw new Error('SEG reading failed');
-    }
+    const { displaySetService } = this.servicesManager.services;
+    const { segmentationId, imageIds, derivedImageIds, segments, colorLUT, label } =
+      buildSEGSegmentationData(segDisplaySet, displaySetService, options.segmentationId);
 
-    segmentationId = segmentationId ?? segDisplaySet.displaySetInstanceUID;
-    const referencedDisplaySetInstanceUID = segDisplaySet.referencedDisplaySetInstanceUID;
-    const referencedDisplaySet = this.servicesManager.services.displaySetService.getDisplaySetByUID(
-      referencedDisplaySetInstanceUID
-    );
-
-    const images = referencedDisplaySet.instances;
-
-    if (!images.length) {
-      throw new Error('No instances were provided for the referenced display set of the SEG');
-    }
-
-    const imageIds = images.map(image => image.imageId);
-    const derivedImages = labelMapImages?.flat();
-    const derivedImageIds = derivedImages.map(image => image.imageId);
-
-    segDisplaySet.images = derivedImages.map(image => ({
-      ...image,
-      ...metaData.get('instance', image.referencedImageId),
-    }));
-
-    segDisplaySet.imageIds = derivedImageIds;
-
-    // We should parse the segmentation as separate slices to support overlapping segments.
-    // This parsing should occur in the CornerstoneJS library adapters.
-    // For now, we use the volume returned from the library and chop it here.
-    let firstSegmentedSliceImageId = null;
-    for (let i = 0; i < derivedImages.length; i++) {
-      const voxelManager = derivedImages[i].voxelManager as csTypes.IVoxelManager<number>;
-      const scalarData = voxelManager.getScalarData();
-      voxelManager.setScalarData(scalarData);
-
-      // Check if this slice has any non-zero voxels and we haven't found one yet
-      if (!firstSegmentedSliceImageId && scalarData.some(value => value !== 0)) {
-        firstSegmentedSliceImageId = derivedImages[i].referencedImageId;
-      }
-    }
-
-    // assign the first non zero voxel image id to the segDisplaySet
-    segDisplaySet.firstSegmentedSliceImageId = firstSegmentedSliceImageId;
-
-    const segmentsInfo = segDisplaySet.segMetadata.data;
-
-    const segments: { [segmentIndex: string]: cstTypes.Segment } = {};
-    const colorLUT = [];
-
-    segmentsInfo.forEach((segmentInfo, index) => {
-      if (index === 0) {
-        colorLUT.push([0, 0, 0, 0]);
-        return;
-      }
-
-      const {
-        SegmentedPropertyCategoryCodeSequence,
-        SegmentNumber,
-        SegmentLabel,
-        SegmentAlgorithmType,
-        SegmentAlgorithmName,
-        SegmentedPropertyTypeCodeSequence,
-        rgba,
-      } = segmentInfo;
-
-      colorLUT.push(rgba);
-
-      const segmentIndex = Number(SegmentNumber);
-
-      const centroid = segDisplaySet.centroids?.get(index);
-      const imageCentroidXYZ = centroid?.image || { x: 0, y: 0, z: 0 };
-      const worldCentroidXYZ = centroid?.world || { x: 0, y: 0, z: 0 };
-
-      segments[segmentIndex] = {
-        segmentIndex,
-        label: SegmentLabel || `Segment ${SegmentNumber}`,
-        locked: false,
-        active: false,
-        cachedStats: {
-          center: {
-            image: [imageCentroidXYZ.x, imageCentroidXYZ.y, imageCentroidXYZ.z],
-            world: [worldCentroidXYZ.x, worldCentroidXYZ.y, worldCentroidXYZ.z],
-          },
-          modifiedTime: segDisplaySet.SeriesDate,
-          category: SegmentedPropertyCategoryCodeSequence
-            ? SegmentedPropertyCategoryCodeSequence.CodeMeaning
-            : '',
-          type: SegmentedPropertyTypeCodeSequence
-            ? SegmentedPropertyTypeCodeSequence.CodeMeaning
-            : '',
-          algorithmType: SegmentAlgorithmType,
-          algorithmName: SegmentAlgorithmName,
-        },
-      };
-    });
-
-    // get next color lut index
     const colorLUTIndex = getNextColorLUTIndex();
     addColorLUT(colorLUT, colorLUTIndex);
     this._segmentationIdToColorLUTIndexMap.set(segmentationId, colorLUTIndex);
 
-    this._broadcastEvent(EVENTS.SEGMENTATION_LOADING_COMPLETE, {
-      segmentationId,
-      segDisplaySet,
-    });
+    this._broadcastEvent(EVENTS.SEGMENTATION_LOADING_COMPLETE, { segmentationId, segDisplaySet });
 
     const seg: cstTypes.SegmentationPublicInput = {
       segmentationId,
       representation: {
         type: LABELMAP,
-        data: {
-          imageIds: derivedImageIds,
-          // referencedVolumeId: this._getVolumeIdForDisplaySet(referencedDisplaySet),
-          referencedImageIds: imageIds as string[],
-        },
+        data: { imageIds: derivedImageIds, referencedImageIds: imageIds as string[] },
       },
-      config: {
-        label: segDisplaySet.SeriesDescription,
-        segments,
-      },
+      config: { label, segments },
     };
 
     segDisplaySet.isLoaded = true;
-
     this.addOrUpdateSegmentation(seg);
-
     return segmentationId;
   }
 
@@ -1054,140 +1193,33 @@ class SegmentationService extends PubSubService {
     }
   ): Promise<string> {
     const { type } = options;
-    let { segmentationId } = options;
 
-    // Currently, only contour representation is supported for RT display
     if (type !== CONTOUR) {
       throw new Error('Only contour type is supported for RT display sets right now');
     }
 
-    // Assign segmentationId if not provided
-    segmentationId = segmentationId ?? rtDisplaySet.displaySetInstanceUID;
-    const { structureSet } = rtDisplaySet;
-
-    if (!structureSet) {
-      throw new Error(
-        'To create the contours from RT displaySet, the displaySet should be loaded first. You can perform rtDisplaySet.load() before calling this method.'
+    const { displaySetService } = this.servicesManager.services;
+    const { segmentationId, geometryIds, segments, colorLUT, label } =
+      await buildRTSegmentationData(
+        rtDisplaySet,
+        displaySetService,
+        data => this._broadcastEvent(EVENTS.SEGMENT_LOADING_COMPLETE, data),
+        options.segmentationId
       );
-    }
 
-    const rtDisplaySetUID = rtDisplaySet.displaySetInstanceUID;
-    const referencedDisplaySet = this.servicesManager.services.displaySetService.getDisplaySetByUID(
-      rtDisplaySet.referencedDisplaySetInstanceUID
-    );
-
-    const referencedImageIdsWithGeometry = Array.from(structureSet.ReferencedSOPInstanceUIDsSet);
-
-    const referencedImageIds = referencedDisplaySet.imageIds;
-    // find the first image id that contains a referenced SOP instance UID
-    const firstSegmentedSliceImageId =
-      referencedImageIds?.find(imageId =>
-        referencedImageIdsWithGeometry.some(referencedId => imageId.includes(referencedId))
-      ) || null;
-
-    rtDisplaySet.firstSegmentedSliceImageId = firstSegmentedSliceImageId;
-    // Map ROI contours to RT Struct Data
-    const allRTStructData = mapROIContoursToRTStructData(structureSet, rtDisplaySetUID);
-
-    // Sort by segmentIndex for consistency
-    allRTStructData.sort((a, b) => a.segmentIndex - b.segmentIndex);
-
-    const geometryIds = allRTStructData.map(({ geometryId }) => geometryId);
-
-    // Initialize SegmentationPublicInput similar to SEG function
-    const segmentation: cstTypes.SegmentationPublicInput = {
-      segmentationId,
-      representation: {
-        type: CONTOUR,
-        data: {
-          geometryIds,
-        },
-      },
-      config: {
-        label: rtDisplaySet.SeriesDescription,
-      },
-    };
-
-    if (!structureSet.ROIContours?.length) {
-      throw new Error(
-        'The structureSet does not contain any ROIContours. Please ensure the structureSet is loaded first.'
-      );
-    }
-
-    const segments: { [segmentIndex: string]: cstTypes.Segment } = {};
-    let segmentsCachedStats = {};
-
-    // Create colorLUT array for RT structures
-    const colorLUT = [[0, 0, 0, 0]]; // First entry is transparent for index 0
-
-    // Process each segment similarly to the SEG function
-    for (const rtStructData of allRTStructData) {
-      const { data, id, color, segmentIndex, geometryId } = rtStructData;
-
-      // Add the color to the colorLUT array
-      colorLUT.push(color);
-
-      try {
-        const geometry = await geometryLoader.createAndCacheGeometry(geometryId, {
-          geometryData: {
-            data,
-            id,
-            color,
-            frameOfReferenceUID: structureSet.frameOfReferenceUID,
-            segmentIndex,
-          },
-          type: csEnums.GeometryType.CONTOUR,
-        });
-
-        const contourSet = geometry.data as csTypes.IContourSet;
-        const centroid = contourSet.centroid;
-
-        segmentsCachedStats = {
-          center: { world: centroid },
-          modifiedTime: rtDisplaySet.SeriesDate, // Using SeriesDate as modifiedTime
-        };
-
-        segments[segmentIndex] = {
-          label: id,
-          segmentIndex,
-          cachedStats: segmentsCachedStats,
-          locked: false,
-          active: false,
-        };
-
-        // Broadcast segment loading progress
-        const numInitialized = Object.keys(segmentsCachedStats).length;
-        const percentComplete = Math.round((numInitialized / allRTStructData.length) * 100);
-        this._broadcastEvent(EVENTS.SEGMENT_LOADING_COMPLETE, {
-          percentComplete,
-          numSegments: allRTStructData.length,
-        });
-      } catch (e) {
-        console.warn(`Error initializing contour for segment ${segmentIndex}:`, e);
-        continue; // Continue processing other segments even if one fails
-      }
-    }
-
-    // Create and register the colorLUT
     const colorLUTIndex = getNextColorLUTIndex();
     addColorLUT(colorLUT, colorLUTIndex);
     this._segmentationIdToColorLUTIndexMap.set(segmentationId, colorLUTIndex);
 
-    // Assign processed segments to segmentation config
-    segmentation.config.segments = segments;
-
-    // Broadcast segmentation loading complete event
-    this._broadcastEvent(EVENTS.SEGMENTATION_LOADING_COMPLETE, {
+    const segmentation: cstTypes.SegmentationPublicInput = {
       segmentationId,
-      rtDisplaySet,
-    });
+      representation: { type: CONTOUR, data: { geometryIds } },
+      config: { label, segments },
+    };
 
-    // Mark the RT display set as loaded
+    this._broadcastEvent(EVENTS.SEGMENTATION_LOADING_COMPLETE, { segmentationId, rtDisplaySet });
     rtDisplaySet.isLoaded = true;
-
-    // Add or update the segmentation in the state
     this.addOrUpdateSegmentation(segmentation);
-
     return segmentationId;
   }
 
@@ -1341,7 +1373,7 @@ class SegmentationService extends PubSubService {
 
     // update the segmentation
     if (!config.label) {
-      config.label = `${i18n.t('Segment')} ${segmentIndex}`;
+      config.label = `Label ${segmentIndex}`;
     }
 
     const currentSegments = csSegmentation.segments;
@@ -1385,6 +1417,8 @@ class SegmentationService extends PubSubService {
         this.setSegmentVisibility(viewportId, segmentationId, segmentIndex, config.visibility);
       }
     });
+
+    this._broadcastEvent(this.EVENTS.SEGMENTATION_MODIFIED, { segmentationId });
   }
 
   /**
@@ -1401,6 +1435,8 @@ class SegmentationService extends PubSubService {
    *
    */
   public removeSegment(segmentationId: string, segmentIndex: number): void {
+    this._clearSegmentFromDynamicBuffers(segmentationId, segmentIndex);
+    this._clearSegmentFromLabelmapData(segmentationId, segmentIndex);
     cstSegmentation.removeSegment(segmentationId, segmentIndex);
     triggerSegmentationRenderBySegmentationId(segmentationId);
   }
@@ -1557,6 +1593,10 @@ class SegmentationService extends PubSubService {
    */
   public setActiveSegment(segmentationId: string, segmentIndex: number): void {
     this._setActiveSegment(segmentationId, segmentIndex);
+    this._broadcastEvent(this.EVENTS.ACTIVE_SEGMENT_MODIFIED, {
+      segmentationId,
+      segmentIndex,
+    });
   }
 
   /**
@@ -1851,7 +1891,7 @@ class SegmentationService extends PubSubService {
         shouldAddRepresentation: true,
       };
     } else {
-      await this.handleVolumeViewport(
+      const shouldAddRepresentation = await this.handleVolumeViewport(
         csViewport as csTypes.IVolumeViewport,
         segmentation,
         isVolumeSegmentation
@@ -1859,7 +1899,7 @@ class SegmentationService extends PubSubService {
       return {
         representationTypeToUse: SegmentationRepresentations.Labelmap,
         isConverted: false,
-        shouldAddRepresentation: true,
+        shouldAddRepresentation,
       };
     }
   }
@@ -1876,6 +1916,17 @@ class SegmentationService extends PubSubService {
     shouldAddRepresentation: boolean;
   }> {
     if (isVolumeSegmentation) {
+      const referencedImageIds = getSanitizedLabelmapReferencedImageIds(
+        segmentation.segmentationId
+      );
+      if (!hasReconstructableImageGeometry(referencedImageIds)) {
+        return {
+          representationTypeToUse: SegmentationRepresentations.Labelmap,
+          isConverted: false,
+          shouldAddRepresentation: true,
+        };
+      }
+
       if (this._shouldSkipVolumeViewportConversion()) {
         return {
           representationTypeToUse: SegmentationRepresentations.Labelmap,
@@ -1931,15 +1982,16 @@ class SegmentationService extends PubSubService {
       config: { colorLUTOrIndex: colorLUTIndex, ...config },
     };
 
-    const addRepresentation = () =>
+    const addRepresentation = () => {
       cstSegmentation.addSegmentationRepresentations(viewportId, [representation]);
+    };
 
     if (isConverted) {
       const { viewportGridService } = this.servicesManager.services;
       await new Promise<void>(resolve => {
         const { unsubscribe } = viewportGridService.subscribe(
           viewportGridService.EVENTS.GRID_STATE_CHANGED,
-          () => {
+          event => {
             addRepresentation();
             unsubscribe();
             resolve();
@@ -1954,29 +2006,35 @@ class SegmentationService extends PubSubService {
     viewport: csTypes.IVolumeViewport,
     segmentation: SegmentationData,
     isVolumeSegmentation: boolean
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (isVolumeSegmentation) {
-      return; // Volume Labelmap on Volume Viewport is natively supported
+      return true; // Volume Labelmap on Volume Viewport is natively supported
     }
 
     const frameOfReferenceUID = viewport.getFrameOfReferenceUID();
     const imageIds = getSanitizedLabelmapImageIds(segmentation.segmentationId);
+    const referencedImageIds = getSanitizedLabelmapReferencedImageIds(segmentation.segmentationId);
     if (!imageIds.length) {
-      return;
+      return false;
     }
+
     const segImage = cache.getImage(imageIds[0]);
 
     if (segImage?.FrameOfReferenceUID !== frameOfReferenceUID) {
-      return;
+      return false;
     }
 
     const volumeIds = viewport.getAllVolumeIds?.() ?? [];
     const dynamicVolumeId = volumeIds.find(id => cache.getVolume(id)?.isDynamicVolume?.());
 
     if (!dynamicVolumeId) {
+      if (!hasReconstructableImageGeometry(referencedImageIds)) {
+        return false;
+      }
+
       // Static 3D volume: use the standard conversion path.
       await convertStackToVolumeLabelmap(segmentation);
-      return;
+      return true;
     }
 
     // Dynamic-volume (3D+T) viewport.
@@ -2007,7 +2065,11 @@ class SegmentationService extends PubSubService {
       volumeLoader.createLocalLabelmapVolume(
         {
           metadata: structuredClone(dynamicVolume.metadata),
-          dimensions: [dynamicVolume.dimensions[0], dynamicVolume.dimensions[1], dynamicVolume.dimensions[2]],
+          dimensions: [
+            dynamicVolume.dimensions[0],
+            dynamicVolume.dimensions[1],
+            dynamicVolume.dimensions[2],
+          ],
           spacing: dynamicVolume.spacing,
           origin: dynamicVolume.origin,
           direction: dynamicVolume.direction,
@@ -2043,8 +2105,7 @@ class SegmentationService extends PubSubService {
         { length: numTimePoints },
         () => new Uint8Array(scalarLength)
       );
-      const currentTimePoint =
-        Math.max(1, Number(dynamicVolume?.dimensionGroupNumber) || 1) - 1;
+      const currentTimePoint = Math.max(1, Number(dynamicVolume?.dimensionGroupNumber) || 1) - 1;
       const activeScalar = readVolumeScalarDataFromImages(labelmapVolume);
       if (activeScalar && scalarBuffers[currentTimePoint]) {
         scalarBuffers[currentTimePoint].set(activeScalar);
@@ -2075,6 +2136,8 @@ class SegmentationService extends PubSubService {
         this._onDynamicVolumeTimePointChanged
       );
     }
+
+    return true;
   }
 
   /** Swaps per-timepoint scalar buffers when the cine player changes frame. */
@@ -2099,7 +2162,23 @@ class SegmentationService extends PubSubService {
       }
 
       // Persist the current timepoint's edits into its buffer.
-      state.scalarBuffers[state.currentTimePoint].set(activeScalar);
+      const restoreWriteProtected =
+        (state.restoreWriteProtectedUntil || 0) > Date.now() &&
+        state.restoredTimePoints?.has(state.currentTimePoint);
+      const activeScalarIsEmpty = countNonZero(activeScalar) === 0;
+      const currentBufferHasData = countNonZero(state.scalarBuffers[state.currentTimePoint]) > 0;
+
+      if (restoreWriteProtected && activeScalarIsEmpty && currentBufferHasData) {
+        logDynamicSegmentation('timePointChanged:skip-empty-restore-overwrite', {
+          segmentationId: segId,
+          labelmapVolumeId: state.labelmapVolumeId,
+          fromTimePoint: state.currentTimePoint,
+          toTimePoint: timePointIndex,
+          protectedUntil: state.restoreWriteProtectedUntil,
+        });
+      } else {
+        state.scalarBuffers[state.currentTimePoint].set(activeScalar);
+      }
 
       // Restore the target timepoint's data into the live scalar buffer in-place.
       if (!writeVolumeScalarDataToImages(labelmapVolume, state.scalarBuffers[timePointIndex])) {
@@ -2172,6 +2251,12 @@ class SegmentationService extends PubSubService {
     if (!imageIds.length) {
       return { isConverted: false, shouldAddRepresentation: false };
     }
+
+    const referencedImageIds = getSanitizedLabelmapReferencedImageIds(segmentation.segmentationId);
+    if (!hasReconstructableImageGeometry(referencedImageIds)) {
+      return { isConverted: false, shouldAddRepresentation: true };
+    }
+
     const frameOfReferenceUID = viewport.getFrameOfReferenceUID();
     const segImage = cache.getImage(imageIds[0]);
 
@@ -2181,7 +2266,7 @@ class SegmentationService extends PubSubService {
       segImage.FrameOfReferenceUID === frameOfReferenceUID
     ) {
       if (this._shouldSkipVolumeViewportConversion()) {
-        return { isConverted: false, shouldAddRepresentation: false };
+        return { isConverted: false, shouldAddRepresentation: true };
       }
 
       const isConverted = await this.convertStackToVolumeViewport(viewport);
@@ -2246,72 +2331,14 @@ class SegmentationService extends PubSubService {
     payload: Partial<cstTypes.Segmentation>
   ) {
     cstSegmentation.updateSegmentations([{ segmentationId, payload }]);
+    this._broadcastEvent(this.EVENTS.SEGMENTATION_MODIFIED, { segmentationId });
   }
 
   private _toOHIFSegmentationRepresentation(
     viewportId: string,
     csRepresentation: cstTypes.SegmentationRepresentation
   ): SegmentationRepresentation {
-    const { segmentationId, type, active, visible } = csRepresentation;
-    const { colorLUTIndex } = csRepresentation;
-
-    const segmentsRepresentations: { [segmentIndex: number]: SegmentRepresentation } = {};
-
-    const segmentation = cstSegmentation.state.getSegmentation(segmentationId);
-
-    if (!segmentation) {
-      throw new Error(`Segmentation with ID ${segmentationId} not found.`);
-    }
-
-    const segmentIds = Object.keys(segmentation.segments);
-
-    for (const segmentId of segmentIds) {
-      const segmentIndex = parseInt(segmentId, 10);
-
-      const color = cstSegmentation.config.color.getSegmentIndexColor(
-        viewportId,
-        segmentationId,
-        segmentIndex
-      );
-
-      const isVisible = cstSegmentation.config.visibility.getSegmentIndexVisibility(
-        viewportId,
-        {
-          segmentationId,
-          type,
-        },
-        segmentIndex
-      );
-
-      segmentsRepresentations[segmentIndex] = {
-        color,
-        segmentIndex,
-        opacity: color[3],
-        visible: isVisible,
-      };
-    }
-
-    const styles = cstSegmentation.config.style.getStyle({
-      viewportId,
-      segmentationId,
-      type,
-    });
-
-    const id = `${segmentationId}-${type}-${viewportId}`;
-
-    return {
-      id: id,
-      segmentationId,
-      label: segmentation.label,
-      active,
-      type,
-      visible,
-      segments: segmentsRepresentations,
-      styles,
-      viewportId,
-      colorLUTIndex,
-      config: {},
-    };
+    return toOHIFSegmentationRepresentation(viewportId, csRepresentation);
   }
 
   private _initSegmentationService() {
@@ -2364,64 +2391,15 @@ class SegmentationService extends PubSubService {
     animationLength: number,
     representation: cstTypes.SegmentationRepresentation
   ) {
-    const { segmentationId } = representation;
-    const newSegmentSpecificConfig = {
-      fillAlpha: alpha,
-    };
-
-    if (hideOthers) {
-      throw new Error('hideOthers is not working right now');
-      for (let i = 0; i < segments.length; i++) {
-        if (i !== segmentIndex) {
-          newSegmentSpecificConfig[i] = {
-            fillAlpha: 0,
-          };
-        }
-      }
-    }
-
-    const { fillAlpha } = this.getStyle({
-      viewportId,
-      segmentationId,
-      type: LABELMAP,
+    highlightLabelmap(
       segmentIndex,
-    }) as cstTypes.LabelmapStyle;
-
-    let startTime: number = null;
-    const animation = (timestamp: number) => {
-      if (startTime === null) {
-        startTime = timestamp;
-      }
-
-      const elapsed = timestamp - startTime;
-      const progress = Math.min(elapsed / animationLength, 1);
-
-      cstSegmentation.config.style.setStyle(
-        {
-          segmentationId,
-          segmentIndex,
-          type: LABELMAP,
-        },
-        {
-          fillAlpha: easeInOutBell(progress, fillAlpha),
-        }
-      );
-
-      if (progress < 1) {
-        requestAnimationFrame(animation);
-      } else {
-        cstSegmentation.config.style.setStyle(
-          {
-            segmentationId,
-            segmentIndex,
-            type: LABELMAP,
-          },
-          {}
-        );
-      }
-    };
-
-    requestAnimationFrame(animation);
+      alpha,
+      hideOthers,
+      segments,
+      viewportId,
+      animationLength,
+      representation
+    );
   }
 
   private _highlightContour(
@@ -2433,41 +2411,15 @@ class SegmentationService extends PubSubService {
     animationLength: number,
     representation: cstTypes.SegmentationRepresentation
   ) {
-    const { segmentationId } = representation;
-    const startTime = performance.now();
-
-    const prevStyle = cstSegmentation.config.style.getStyle({
-      type: CONTOUR,
-    }) as ContourStyle;
-
-    const prevOutlineWidth = prevStyle.outlineWidth;
-    // make this configurable
-    const baseline = Math.max(prevOutlineWidth * 3.5, 5);
-
-    const animate = (currentTime: number) => {
-      const progress = (currentTime - startTime) / animationLength;
-      if (progress >= 1) {
-        cstSegmentation.config.style.resetToGlobalStyle();
-        return;
-      }
-
-      const reversedProgress = easeInOutBellRelative(progress, baseline, prevOutlineWidth);
-
-      cstSegmentation.config.style.setStyle(
-        {
-          segmentationId,
-          segmentIndex,
-          type: CONTOUR,
-        },
-        {
-          outlineWidth: reversedProgress,
-        }
-      );
-
-      requestAnimationFrame(animate);
-    };
-
-    requestAnimationFrame(animate);
+    highlightContour(
+      segmentIndex,
+      alpha,
+      hideOthers,
+      segments,
+      viewportId,
+      animationLength,
+      representation
+    );
   }
 
   private _toggleSegmentationRepresentationVisibility = (
@@ -2569,13 +2521,17 @@ class SegmentationService extends PubSubService {
         },
       },
     ]);
+
+    this._broadcastEvent(this.EVENTS.SEGMENTATION_MODIFIED, { segmentationId });
   }
 
   private _onSegmentationDataModifiedFromSource = evt => {
-    const { segmentationId } = evt.detail;
+    const { segmentationId, modifiedSlicesToUse, segmentIndex } = evt.detail;
     this.syncDynamicSegmentationCurrentTimePoint(segmentationId);
     this._broadcastEvent(this.EVENTS.SEGMENTATION_DATA_MODIFIED, {
       segmentationId,
+      modifiedSlicesToUse,
+      segmentIndex,
     });
   };
 

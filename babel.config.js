@@ -27,6 +27,7 @@ module.exports = {
         'babel-plugin-istanbul',
         '@babel/plugin-proposal-object-rest-spread',
         '@babel/plugin-syntax-dynamic-import',
+        '@babel/plugin-transform-for-of',
         '@babel/plugin-transform-regenerator',
         '@babel/transform-destructuring',
         '@babel/plugin-transform-runtime',

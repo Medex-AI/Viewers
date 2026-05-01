@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { useResizeDetector } from 'react-resize-detector';
 import * as cs3DTools from '@cornerstonejs/tools';
-import { Enums, eventTarget, getEnabledElement, utilities as csUtils } from '@cornerstonejs/core';
+import { cache, Enums, eventTarget, getEnabledElement, utilities as csUtils } from '@cornerstonejs/core';
 import { MeasurementService } from '@ohif/core';
 import { AllInOneMenu } from '@ohif/ui-next';
 import { useViewportDialog } from '@ohif/ui-next';
@@ -44,7 +44,8 @@ const getTouchDistance = (touches: Touch[]) => {
 };
 
 const getTouchArray = (touchList: TouchList) => Array.from(touchList);
-const getTouchType = (touch?: Touch) => (touch as Touch & { touchType?: string })?.touchType || 'unknown';
+const getTouchType = (touch?: Touch) =>
+  (touch as Touch & { touchType?: string })?.touchType || 'unknown';
 const touchListContainsStylus = (touches: TouchList | Touch[]) =>
   Array.from(touches || []).some(
     touch => (touch as Touch & { touchType?: string })?.touchType === 'stylus'
@@ -138,6 +139,8 @@ const OHIFCornerstoneViewport = React.memo(
     const [enabledVPElement, setEnabledVPElement] = useState(null);
     const [inputDebugInfo, setInputDebugInfo] = useState('');
     const [contourDebugInfo, setContourDebugInfo] = useState('');
+    const [brushDebugInfo, setBrushDebugInfo] = useState('');
+    const [brushSaveDebugInfo, setBrushSaveDebugInfo] = useState('');
     const elementRef = useRef() as React.MutableRefObject<HTMLDivElement>;
     const tabletGestureStateRef = useRef<{
       mode: null | 'zoom' | 'scroll' | 'pan';
@@ -364,7 +367,17 @@ const OHIFCornerstoneViewport = React.memo(
       const intervalId = window.setInterval(() => {
         const latestContourDebug =
           (window as Window & { __oviContourDebugInfo?: string }).__oviContourDebugInfo || '';
-        setContourDebugInfo(current => (current === latestContourDebug ? current : latestContourDebug));
+        setContourDebugInfo(current =>
+          current === latestContourDebug ? current : latestContourDebug
+        );
+        const latestBrushDebug =
+          (window as Window & { __oviBrushDebugInfo?: string }).__oviBrushDebugInfo || '';
+        setBrushDebugInfo(current => (current === latestBrushDebug ? current : latestBrushDebug));
+        const latestBrushSaveDebug =
+          (window as Window & { __oviBrushSaveDebugInfo?: string }).__oviBrushSaveDebugInfo || '';
+        setBrushSaveDebugInfo(current =>
+          current === latestBrushSaveDebug ? current : latestBrushSaveDebug
+        );
       }, 100);
 
       return () => {
@@ -392,6 +405,222 @@ const OHIFCornerstoneViewport = React.memo(
       const isContourMode = () => {
         const activeTool = getActiveToolName();
         return activeTool === 'ManualContour' || activeTool === 'MaskContour';
+      };
+
+      const isBrushOrEraserMode = () => {
+        const activeTool = getActiveToolName() || '';
+        return activeTool.includes('Brush') || activeTool.includes('Eraser');
+      };
+
+      const stackLabelmapFrameBuffers = new Map<string, Uint8Array>();
+      const previousImageIndexBySegmentation = new Map<string, number>();
+
+      const getSegmentationIdsForViewport = () => {
+        const segmentationApi = (cs3DTools as any).segmentation;
+        const cornerstoneRepresentations =
+          segmentationApi?.state?.getSegmentationRepresentations?.(viewportId) ?? [];
+        const serviceRepresentations =
+          segmentationService?.getSegmentationRepresentations?.(viewportId) ?? [];
+        const segmentations =
+          segmentationService?.getSegmentations?.() ??
+          segmentationApi?.state?.getSegmentations?.() ??
+          [];
+        return Array.from(
+          new Set(
+            [...cornerstoneRepresentations, ...serviceRepresentations, ...segmentations]
+              .map((item: any) => item?.segmentationId)
+              .filter(Boolean)
+          )
+        ) as string[];
+      };
+
+      const rememberCurrentStackLabelmapIndex = () => {
+        const viewport = getViewport() as any;
+        const currentImageIndex = viewport?.getCurrentImageIdIndex?.();
+        if (typeof currentImageIndex !== 'number') {
+          return;
+        }
+
+        for (const segmentationId of getSegmentationIdsForViewport()) {
+          previousImageIndexBySegmentation.set(segmentationId, currentImageIndex);
+        }
+      };
+
+      const syncReusableStackLabelmapForSliceChange = (segmentationId: string, viewport: any) => {
+        const segmentationApi = (cs3DTools as any).segmentation;
+        const currentImageIndex = viewport?.getCurrentImageIdIndex?.();
+        if (typeof currentImageIndex !== 'number') {
+          return false;
+        }
+
+        const labelmapImageId =
+          segmentationApi?.state?.getCurrentLabelmapImageIdForViewport?.(
+            viewportId,
+            segmentationId
+          );
+        if (!labelmapImageId) {
+          return false;
+        }
+
+        const labelmapImage = cache.getImage(labelmapImageId) as any;
+        const scalarData = labelmapImage?.voxelManager?.getScalarData?.() as Uint8Array | undefined;
+        if (!scalarData) {
+          return false;
+        }
+
+        const previousIndex = previousImageIndexBySegmentation.get(segmentationId) ?? currentImageIndex;
+        if (previousIndex === currentImageIndex) {
+          previousImageIndexBySegmentation.set(segmentationId, currentImageIndex);
+          return false;
+        }
+
+        stackLabelmapFrameBuffers.set(
+          `${segmentationId}:${previousIndex}`,
+          new Uint8Array(scalarData)
+        );
+
+        const currentKey = `${segmentationId}:${currentImageIndex}`;
+        const targetBuffer = stackLabelmapFrameBuffers.get(currentKey);
+        if (targetBuffer) {
+          scalarData.set(targetBuffer);
+        } else {
+          scalarData.fill(0);
+        }
+
+        previousImageIndexBySegmentation.set(segmentationId, currentImageIndex);
+        labelmapImage.imageData?.modified?.();
+        labelmapImage.invalidate?.();
+        return true;
+      };
+
+      const refreshCurrentLabelmapActorsForSliceChange = (eventName: string) => {
+        const viewport = getViewport() as any;
+        const forceLabelmapOverlayPass = (actor: any) => {
+          // Stack labelmap slices are coplanar with the source image; render them in the translucent
+          // overlay pass so slice changes do not let the base image occlude the segmentation.
+          actor?.setForceTranslucent?.(true);
+          actor?.setForceOpaque?.(false);
+        };
+        const segmentationApi = (cs3DTools as any).segmentation;
+        const segmentationIds = getSegmentationIdsForViewport();
+
+        if (!viewport || !segmentationIds.length) {
+          return { refreshed: 0, current: 0 };
+        }
+
+        let refreshed = 0;
+        let current = 0;
+
+        for (const segmentationId of segmentationIds) {
+          syncReusableStackLabelmapForSliceChange(segmentationId, viewport);
+          const currentLabelmapImageIds =
+            segmentationApi?.state?.getCurrentLabelmapImageIdsForViewport?.(
+              viewportId,
+              segmentationId
+            ) ?? [];
+          const entries =
+            segmentationApi?.helpers?.getLabelmapActorEntries?.(viewportId, segmentationId) ?? [];
+
+          for (const entry of entries) {
+            if (!currentLabelmapImageIds.includes(entry?.referencedId)) {
+              continue;
+            }
+
+            current += 1;
+            entry.actor?.setVisibility?.(true);
+            forceLabelmapOverlayPass(entry.actor);
+            entry.actor?.getProperty?.()?.modified?.();
+            entry.actor?.getMapper?.()?.modified?.();
+            entry.actor?.modified?.();
+
+            refreshed += 1;
+          }
+        }
+
+        if (current === 0) {
+          const actorEntries = viewport.getActors?.() ?? [];
+          for (const entry of actorEntries) {
+            if (!entry?.referencedId?.startsWith?.('derived:') || !entry.actor) {
+              continue;
+            }
+
+            current += 1;
+            entry.actor.setVisibility?.(true);
+            forceLabelmapOverlayPass(entry.actor);
+            entry.actor.getProperty?.()?.modified?.();
+            entry.actor.getMapper?.()?.modified?.();
+            entry.actor.modified?.();
+
+            refreshed += 1;
+          }
+        }
+
+        if (refreshed > 0) {
+          const render = () => {
+            cs3DTools.utilities.segmentation.triggerSegmentationRender?.(viewportId);
+            viewport.render?.();
+          };
+          window.requestAnimationFrame(render);
+          window.setTimeout(render, 0);
+        }
+
+        const message = `labelmap: slice-change=${eventName} current=${current} refreshed=${refreshed}`;
+        (window as Window & { __oviLabelmapDebugInfo?: string }).__oviLabelmapDebugInfo = message;
+
+        return { refreshed, current };
+      };
+
+      const invalidateBrushCursorForSliceChange = (eventName: string) => {
+        if (!isBrushOrEraserMode()) {
+          return;
+        }
+
+        const viewportInfo = cornerstoneViewportService.getViewportInfo(viewportId);
+        const toolGroupId = viewportInfo?.getToolGroupId?.();
+        if (!toolGroupId) {
+          return;
+        }
+
+        cs3DTools.utilities.segmentation.invalidateBrushCursor?.(toolGroupId);
+        cs3DTools.utilities.segmentation.triggerSegmentationRender?.(viewportId);
+        const viewport = getViewport() as any;
+        const labelmapRefresh = refreshCurrentLabelmapActorsForSliceChange(eventName);
+        const message = `brush/eraser: slice-change=${eventName} tool=${
+          getActiveToolName() || 'none'
+        } vp=${viewport?.getCurrentImageIdIndex?.() ?? '-'} invalidated=yes labelmap=${
+          labelmapRefresh.refreshed
+        }/${labelmapRefresh.current}`;
+        (window as Window & { __oviBrushDebugInfo?: string }).__oviBrushDebugInfo = message;
+        setBrushDebugInfo(message);
+      };
+
+      const getDisplaySetReferenceImageIds = () => {
+        const displaySet = displaySets?.[0] as any;
+        if (displaySet?.isDynamicVolume && displaySet.dynamicVolumeInfo?.timePoints?.length) {
+          return displaySet.dynamicVolumeInfo.timePoints.flat();
+        }
+        return displaySet?.imageIds ?? [];
+      };
+
+      const updateBrushDebugFromInput = (eventName: string) => {
+        if (!isBrushOrEraserMode()) {
+          return;
+        }
+
+        const viewport = getViewport() as any;
+        const viewportImageIndex = viewport?.getCurrentImageIdIndex?.();
+        const viewportImageId = viewport?.getCurrentImageId?.();
+        const referenceImageIds = getDisplaySetReferenceImageIds();
+        const referenceIndexFromViewportImage =
+          viewportImageId && referenceImageIds.length
+            ? referenceImageIds.indexOf(viewportImageId)
+            : -1;
+        const message = `brush/eraser: input=${eventName} tool=${
+          getActiveToolName() || 'none'
+        } vp=${viewportImageIndex ?? '-'} refVp=${referenceIndexFromViewportImage} modified=-`;
+
+        (window as Window & { __oviBrushDebugInfo?: string }).__oviBrushDebugInfo = message;
+        setBrushDebugInfo(message);
       };
 
       const shouldHandleTouchGesture = () => {
@@ -444,9 +673,7 @@ const OHIFCornerstoneViewport = React.memo(
           metaKey: false,
         });
 
-        setInputDebugInfo(
-          `longpress:direct touches=1 activeTool=${getActiveToolName() || 'none'}`
-        );
+        setInputDebugInfo(`longpress:direct touches=1 activeTool=${getActiveToolName() || 'none'}`);
         target.dispatchEvent(rightClickEvent);
       };
 
@@ -489,6 +716,7 @@ const OHIFCornerstoneViewport = React.memo(
       };
 
       const handlePencilDown = (event: PointerEvent) => {
+        updateBrushDebugFromInput(event.type);
         setInputDebugInfo(
           `pointerdown:${event.pointerType || 'unknown'} touches=0 activeTool=${getActiveToolName() || 'none'}`
         );
@@ -497,6 +725,7 @@ const OHIFCornerstoneViewport = React.memo(
         }
       };
       const handlePencilUp = (event: PointerEvent) => {
+        updateBrushDebugFromInput(event.type);
         setInputDebugInfo(
           `${event.type}:${event.pointerType || 'unknown'} touches=0 activeTool=${getActiveToolName() || 'none'}`
         );
@@ -507,11 +736,13 @@ const OHIFCornerstoneViewport = React.memo(
 
       const formatTouchDebug = (event: TouchEvent) => {
         const firstTouch = event.touches[0] || event.changedTouches[0];
-        const inferredType = touchListContainsStylus(event.touches) || touchListContainsStylus(event.changedTouches)
-          ? 'stylus'
-          : touchListContainsDirect(event.touches) || touchListContainsDirect(event.changedTouches)
-            ? 'direct'
-            : 'finger';
+        const inferredType =
+          touchListContainsStylus(event.touches) || touchListContainsStylus(event.changedTouches)
+            ? 'stylus'
+            : touchListContainsDirect(event.touches) ||
+                touchListContainsDirect(event.changedTouches)
+              ? 'direct'
+              : 'finger';
         const touchType = getTouchType(firstTouch) || inferredType;
         return `${event.type}:${touchType} touches=${event.touches.length} changed=${event.changedTouches.length} pencil=${pencilActiveRef.current ? 'yes' : 'no'} activeTool=${getActiveToolName() || 'none'}`;
       };
@@ -519,6 +750,7 @@ const OHIFCornerstoneViewport = React.memo(
       const handleTouchStart = (event: TouchEvent) => {
         const isStylusTouch = touchListContainsStylus(event.touches);
         const isDirectTouch = touchListContainsDirect(event.touches);
+        updateBrushDebugFromInput(event.type);
         setInputDebugInfo(formatTouchDebug(event));
 
         if (isDirectTouch && event.touches.length === 1) {
@@ -592,7 +824,10 @@ const OHIFCornerstoneViewport = React.memo(
           const currentPoint = normalizeTouchPoint(event.touches[0]);
           const startPoint = contourLongPressRef.current.startPoint;
           if (startPoint) {
-            const distance = Math.hypot(currentPoint.x - startPoint.x, currentPoint.y - startPoint.y);
+            const distance = Math.hypot(
+              currentPoint.x - startPoint.x,
+              currentPoint.y - startPoint.y
+            );
             if (distance > CONTOUR_LONG_PRESS_MOVE_CANCEL_PX) {
               clearContourLongPress();
             }
@@ -690,7 +925,10 @@ const OHIFCornerstoneViewport = React.memo(
               const rect = element.getBoundingClientRect();
               const previousCenter = getTouchCenter(previousTouches);
               const currentCenter = getTouchCenter(currentTouches);
-              const previousCanvasPoint = [previousCenter.x - rect.left, previousCenter.y - rect.top];
+              const previousCanvasPoint = [
+                previousCenter.x - rect.left,
+                previousCenter.y - rect.top,
+              ];
               const currentCanvasPoint = [currentCenter.x - rect.left, currentCenter.y - rect.top];
               const previousWorldPoint = viewport.canvasToWorld?.(previousCanvasPoint);
               const currentWorldPoint = viewport.canvasToWorld?.(currentCanvasPoint);
@@ -822,7 +1060,12 @@ const OHIFCornerstoneViewport = React.memo(
             const currentWorldPoint = viewport.canvasToWorld?.(currentCanvasPoint);
             const currentCamera = viewport.getCamera?.();
 
-            if (previousWorldPoint && currentWorldPoint && currentCamera?.focalPoint && currentCamera?.position) {
+            if (
+              previousWorldPoint &&
+              currentWorldPoint &&
+              currentCamera?.focalPoint &&
+              currentCamera?.position
+            ) {
               const worldDelta = [
                 previousWorldPoint[0] - currentWorldPoint[0],
                 previousWorldPoint[1] - currentWorldPoint[1],
@@ -830,7 +1073,9 @@ const OHIFCornerstoneViewport = React.memo(
               ];
 
               viewport.setCamera({
-                focalPoint: currentCamera.focalPoint.map((value, index) => value + worldDelta[index]),
+                focalPoint: currentCamera.focalPoint.map(
+                  (value, index) => value + worldDelta[index]
+                ),
                 position: currentCamera.position.map((value, index) => value + worldDelta[index]),
               });
               viewport.render();
@@ -844,6 +1089,7 @@ const OHIFCornerstoneViewport = React.memo(
       };
 
       const handleTouchEnd = (event: TouchEvent) => {
+        updateBrushDebugFromInput(event.type);
         setInputDebugInfo(formatTouchDebug(event));
         if (isContourMode() && touchListContainsDirect(event.changedTouches)) {
           clearContourLongPress();
@@ -906,20 +1152,42 @@ const OHIFCornerstoneViewport = React.memo(
       };
 
       const handleMouseDown = (event: MouseEvent) => {
+        updateBrushDebugFromInput(event.type);
+        if (isBrushOrEraserMode()) {
+          rememberCurrentStackLabelmapIndex();
+        }
         if (event.button === 2) {
-          setInputDebugInfo(
-            `mousedown:right activeTool=${getActiveToolName() || 'none'}`
-          );
+          setInputDebugInfo(`mousedown:right activeTool=${getActiveToolName() || 'none'}`);
         }
       };
 
+      const handleViewportSliceChanged = (event: Event) => {
+        refreshCurrentLabelmapActorsForSliceChange(event.type);
+        invalidateBrushCursorForSliceChange(event.type);
+      };
+
+      const { unsubscribe: unsubscribeSegmentationDataModified } = segmentationService.subscribe(
+        segmentationService.EVENTS.SEGMENTATION_DATA_MODIFIED,
+        rememberCurrentStackLabelmapIndex
+      );
+
       element.addEventListener('mousedown', handleMouseDown, true);
       element.addEventListener('contextmenu', handleContextMenu, true);
+      element.addEventListener(Enums.Events.STACK_NEW_IMAGE, handleViewportSliceChanged);
+      element.addEventListener(Enums.Events.STACK_VIEWPORT_SCROLL, handleViewportSliceChanged);
+      element.addEventListener(Enums.Events.VOLUME_NEW_IMAGE, handleViewportSliceChanged);
 
       if (!isTouchCapableDevice()) {
         return () => {
+          unsubscribeSegmentationDataModified?.();
           element.removeEventListener('mousedown', handleMouseDown, true);
           element.removeEventListener('contextmenu', handleContextMenu, true);
+          element.removeEventListener(Enums.Events.STACK_NEW_IMAGE, handleViewportSliceChanged);
+          element.removeEventListener(
+            Enums.Events.STACK_VIEWPORT_SCROLL,
+            handleViewportSliceChanged
+          );
+          element.removeEventListener(Enums.Events.VOLUME_NEW_IMAGE, handleViewportSliceChanged);
         };
       }
 
@@ -932,9 +1200,13 @@ const OHIFCornerstoneViewport = React.memo(
       element.addEventListener('touchcancel', handleTouchEnd, { passive: false, capture: true });
 
       return () => {
+        unsubscribeSegmentationDataModified?.();
         clearContourLongPress();
         element.removeEventListener('mousedown', handleMouseDown, true);
         element.removeEventListener('contextmenu', handleContextMenu, true);
+        element.removeEventListener(Enums.Events.STACK_NEW_IMAGE, handleViewportSliceChanged);
+        element.removeEventListener(Enums.Events.STACK_VIEWPORT_SCROLL, handleViewportSliceChanged);
+        element.removeEventListener(Enums.Events.VOLUME_NEW_IMAGE, handleViewportSliceChanged);
         element.removeEventListener('pointerdown', handlePencilDown);
         element.removeEventListener('pointerup', handlePencilUp);
         element.removeEventListener('pointercancel', handlePencilUp);
@@ -1079,6 +1351,8 @@ const OHIFCornerstoneViewport = React.memo(
         >
           <div>{inputDebugInfo || 'input: idle'}</div>
           <div>{contourDebugInfo || 'contour: idle'}</div>
+          <div>{brushDebugInfo || 'brush/eraser: idle'}</div>
+          <div>{brushSaveDebugInfo || 'save: idle'}</div>
         </div>
         {/* The OHIFViewportActionCorners follows the viewport in the DOM so that it is naturally at a higher z-index.*/}
         <OHIFViewportActionCorners viewportId={viewportId} />

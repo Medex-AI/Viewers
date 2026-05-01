@@ -18,6 +18,10 @@ import {
   getManualSaveSegmentationId,
   restoreFrames,
   tryAutoCreateSegmentationFromBackend,
+  segLoadLog,
+  snapshotSegState,
+  getSegStudySeries,
+  deleteAllSegFrames,
   type SaveOptions,
   type SaveScope,
 } from './segmentationPersistenceOps';
@@ -26,6 +30,7 @@ import {
   getPhase,
   canAutosave,
   markDirty,
+  destroy as destroyAdapterSegmentation,
   destroyAll as destroyAdapterState,
 } from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
 import { resolveSliceIdentity } from '../../../medex/segmentation/src/utils/sliceIdentityResolver';
@@ -82,15 +87,30 @@ const extensionDependencies = {
 
 function modeFactory({ modeConfiguration }) {
   let _unsubscribeSegmentModified: (() => void) | null = null;
+  let _unsubscribeRepresentationColorSync: (() => void) | null = null;
+  let _unsubscribeActiveSegmentColorSync: (() => void) | null = null;
   let _onContourCompleted: ((evt: Event) => void) | null = null;
+  let _onContourModeChanged: ((evt: Event) => void) | null = null;
   let _unsubscribeSegmentDataModified: (() => void) | null = null;
   let _unsubscribeSegmentationModifiedAutosave: (() => void) | null = null;
   let _unsubscribeSegmentationRepresentationModifiedAutosave: (() => void) | null = null;
   let _unsubscribeSegmentationAdded: (() => void) | null = null;
   let _unsubscribeViewportDataChanged: (() => void) | null = null;
+  let _unsubscribeSegmentationRemovedHandler: (() => void) | null = null;
   let _onKeyDown: ((evt: KeyboardEvent) => void) | null = null;
+  // Pixel save debounce — driven by DATA_MODIFIED and SEGMENTATION_MODIFIED (add/delete/rename).
   const _saveDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const _saveDebounceOptions = new Map<string, Partial<SaveOptions>>();
+  // Metadata save debounce — driven by REPRESENTATION_MODIFIED (color, visibility, lock).
+  // Kept separate so representation events never reset the pixel-save timer, which was the
+  // root cause of the HUD staying "Unsaved" indefinitely after a segment delete.
+  const _metaDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const _segStudySeriesMap = new Map<string, { studyInstanceUID: string; seriesInstanceUID: string }>();
+  // Tracks in-flight restore AbortControllers keyed by segmentationId.
+  // When a SEGMENTATION_MODIFIED fires while a restore is in-flight (e.g., user deletes a
+  // segment before restoreFrames finishes loading from backend), the controller is aborted so
+  // that restoreFrames does not re-inject stale segment metadata.
+  const _restoreAbortControllers = new Map<string, AbortController>();
   // Scoped diagnostic logger — no-op in production builds.
   const logDiag =
     process.env.NODE_ENV !== 'production'
@@ -178,6 +198,7 @@ function modeFactory({ modeConfiguration }) {
       ]);
       toolbarService.createButtonSection('brushToolsSection', [
         'ManualContour',
+        'ManualContourEraser',
         'Brush',
         'Eraser',
         'Threshold',
@@ -202,19 +223,25 @@ function modeFactory({ modeConfiguration }) {
         }
 
         const segmentation = cstSegmentation.state.getSegmentation(segmentationId);
-        const volumeId = (
-          segmentation?.representationData?.[toolEnums.SegmentationRepresentations.Labelmap] as any
-        )?.volumeId;
+        const labelmapData = segmentation?.representationData?.[
+          toolEnums.SegmentationRepresentations.Labelmap
+        ] as any;
+        const volumeId = labelmapData?.volumeId;
         const labelmapVolume = volumeId ? cache.getVolume(volumeId) : null;
         const dimensions =
           (labelmapVolume as any)?.dimensions ||
           (labelmapVolume as any)?.imageData?.getDimensions?.();
         const width = dimensions?.[0] || 0;
         const height = dimensions?.[1] || 0;
-        const numberOfSlices = dimensions?.[2] || 0;
-        const sliceLength = width * height;
+        const imageIds = (labelmapVolume as any)?.imageIds ?? labelmapData?.imageIds ?? [];
+        const sampleImage = imageIds[0] ? cache.getImage(imageIds[0]) : null;
+        const stackWidth = sampleImage?.columns ?? sampleImage?.width ?? 0;
+        const stackHeight = sampleImage?.rows ?? sampleImage?.height ?? 0;
+        const resolvedWidth = width || stackWidth;
+        const resolvedHeight = height || stackHeight;
+        const numberOfSlices = dimensions?.[2] || imageIds.length || 0;
+        const sliceLength = resolvedWidth * resolvedHeight;
         const scalarData = (labelmapVolume as any)?.voxelManager?.getScalarData?.();
-        const imageIds = (labelmapVolume as any)?.imageIds ?? [];
         const getImageScalarData = (imageId?: string) => {
           if (!imageId) {
             return undefined;
@@ -319,10 +346,59 @@ function modeFactory({ modeConfiguration }) {
             return;
           }
           hasAutoActivatedContour = true;
+          commandsManager.runCommand('setManualContourMode', { mode: 'draw' });
           commandsManager.runCommand('setToolActiveToolbar', { toolName: 'ManualContour' });
         }
       );
       _unsubscribeSegmentModified = unsubscribe;
+
+      const { unsubscribe: unsubscribeRepresentationColorSync } = segmentationService.subscribe(
+        segmentationService.EVENTS.SEGMENTATION_REPRESENTATION_MODIFIED,
+        (data: any) => {
+          const { segmentationId } = data || {};
+          try {
+            const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+            if (activeViewportId && segmentationId) {
+              syncManualContourColor(activeViewportId, segmentationId, segmentationService);
+            }
+          } catch {
+            // best-effort
+          }
+        }
+      );
+      _unsubscribeRepresentationColorSync = unsubscribeRepresentationColorSync;
+
+      const { unsubscribe: unsubscribeActiveSegmentColorSync } = segmentationService.subscribe(
+        segmentationService.EVENTS.ACTIVE_SEGMENT_MODIFIED,
+        (data: any) => {
+          const { segmentationId } = data || {};
+          try {
+            const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+            if (activeViewportId && segmentationId) {
+              syncManualContourColor(activeViewportId, segmentationId, segmentationService);
+            }
+          } catch {
+            // best-effort
+          }
+        }
+      );
+      _unsubscribeActiveSegmentColorSync = unsubscribeActiveSegmentColorSync;
+
+      // Re-sync color when draw/erase mode switches so the cursor turns white in erase mode
+      _onContourModeChanged = () => {
+        try {
+          const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+          const activeSegmentation = segmentationService.getActiveSegmentation?.(activeViewportId);
+          const segmentationId =
+            activeSegmentation?.id || activeSegmentation?.segmentationId;
+          if (activeViewportId && segmentationId) {
+            syncManualContourColor(activeViewportId, segmentationId, segmentationService);
+          }
+        } catch {
+          // best-effort
+        }
+      };
+      window.addEventListener('medex:manual-contour-mode-changed', _onContourModeChanged);
 
       // Rasterize ManualContour annotations into the active labelmap segment
       // when the user closes a contour, so the fill appears like a brush stroke.
@@ -355,6 +431,10 @@ function modeFactory({ modeConfiguration }) {
           viewportId: activeViewportId,
           referencedImageId,
           worldPolyline,
+          mode:
+            typeof window !== 'undefined' && (window as any).__medexManualContourMode === 'erase'
+              ? 'erase'
+              : 'draw',
         }).then(result => {
           if (result) {
             annotation.state.removeAnnotation(completedAnnotation.annotationUID);
@@ -363,6 +443,36 @@ function modeFactory({ modeConfiguration }) {
       };
 
       eventTarget.addEventListener(toolEnums.Events.ANNOTATION_COMPLETED, _onContourCompleted);
+
+      if (typeof window !== 'undefined') {
+        (window as any).__medexSegmentationTestApi = {
+          completeManualContour: ({
+            viewportId,
+            referencedImageId,
+            worldPolyline,
+            mode,
+          }: {
+            viewportId?: string;
+            referencedImageId: string;
+            worldPolyline: number[][];
+            mode?: 'draw' | 'erase';
+          }) => {
+            const activeViewportId =
+              viewportId || viewportGridService?.getState?.()?.activeViewportId;
+            if (!activeViewportId) {
+              return Promise.resolve(null);
+            }
+
+            return writeContourToOhifLabelmap({
+              servicesManager,
+              viewportId: activeViewportId,
+              referencedImageId,
+              worldPolyline,
+              mode: mode === 'erase' ? 'erase' : 'draw',
+            });
+          },
+        };
+      }
 
       const scheduleAutosave = (
         segmentationId: string,
@@ -470,6 +580,47 @@ function modeFactory({ modeConfiguration }) {
         );
       };
 
+      // Metadata-only save debounce: re-saves labelMap on existing backend frames without
+      // touching pixel data. Uses its own timer so it never resets the pixel-save debounce.
+      const scheduleMetadataSave = (segmentationId: string) => {
+        if (!canAutosave(segmentationId)) return;
+
+        // Only update the HUD to dirty if there is no pixel save already in flight —
+        // if the pixel save is pending, it will handle the dirty→synced transition.
+        if (!_saveDebounceTimers.has(segmentationId)) {
+          updatePersistenceStatus(
+            servicesManager,
+            'dirty',
+            'Unsaved segmentation changes. Saving will start automatically.'
+          );
+        }
+
+        const existing = _metaDebounceTimers.get(segmentationId);
+        if (existing) clearTimeout(existing);
+
+        _metaDebounceTimers.set(
+          segmentationId,
+          setTimeout(() => {
+            _metaDebounceTimers.delete(segmentationId);
+            if (!canAutosave(segmentationId)) return;
+            // Skip if a pixel save is about to fire — it will carry the updated labelMap.
+            if (_saveDebounceTimers.has(segmentationId)) return;
+            logSegmentationTimeline('autosave:metadata-debounce-fired', { segmentationId });
+            void saveAllFrames(segmentationId, servicesManager, 'all-timepoints', {
+              deleteEmptyFrames: false,
+              writeEmptyPlaceholder: false,
+            }).catch(error => {
+              console.error('[segmentation-mode] metadata-autosave:error', { segmentationId, error });
+              updatePersistenceStatus(
+                servicesManager,
+                'error',
+                error instanceof Error ? error.message : 'Failed to save segmentation changes to backend.'
+              );
+            });
+          }, 1500)
+        );
+      };
+
       // Persist labelmap pixel data whenever a brush stroke modifies it
       const { unsubscribe: unsubDataModified } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_DATA_MODIFIED,
@@ -525,15 +676,103 @@ function modeFactory({ modeConfiguration }) {
       const { unsubscribe: unsubSegModifiedAutosave } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_MODIFIED,
         ({ segmentationId }: { segmentationId: string }) => {
-          scheduleAutosave(segmentationId, 'all-timepoints', 'segmentation-modified');
+          const segmentation = segmentationService.getSegmentation(segmentationId);
+          if (!segmentation) {
+            logSegmentationTimeline('segmentation-modified:skip-autosave-removed', {
+              segmentationId,
+            });
+            return;
+          }
+          // If a restore is in-flight for this segmentation (user modified state before
+          // restoreFrames finished loading), abort the restore so it does not re-inject
+          // stale backend segment metadata over the user's current in-memory state.
+          const existingController = _restoreAbortControllers.get(segmentationId);
+          if (existingController) {
+            logSegmentationTimeline('segmentation-modified:aborting-in-flight-restore', {
+              segmentationId,
+            });
+            existingController.abort();
+            _restoreAbortControllers.delete(segmentationId);
+          }
+          // Lazily cache the study/series so the whole-seg-removed handler can
+          // still look it up after the segmentation has been destroyed.
+          if (!_segStudySeriesMap.has(segmentationId)) {
+            const ids = getSegStudySeries(segmentationId, servicesManager);
+            if (ids) {
+              _segStudySeriesMap.set(segmentationId, ids);
+            }
+          }
+          scheduleAutosave(segmentationId, 'all-timepoints', 'segmentation-modified', {
+            deleteEmptyFrames: true,
+          });
         }
       );
       _unsubscribeSegmentationModifiedAutosave = unsubSegModifiedAutosave;
 
+      // Handle whole-segmentation removal: when SEGMENTATION_MODIFIED fires but
+      // the segmentation is gone, delete all its backend frames.
+      const { unsubscribe: unsubSegRemovedHandler } = segmentationService.subscribe(
+        segmentationService.EVENTS.SEGMENTATION_MODIFIED,
+        ({ segmentationId }: { segmentationId: string }) => {
+          if (segmentationService.getSegmentation(segmentationId) != null) {
+            return; // still alive — the autosave subscriber handles it
+          }
+          const existingTimer = _saveDebounceTimers.get(segmentationId);
+          if (existingTimer) {
+            clearTimeout(existingTimer);
+            _saveDebounceTimers.delete(segmentationId);
+          }
+          const existingMetaTimer = _metaDebounceTimers.get(segmentationId);
+          if (existingMetaTimer) {
+            clearTimeout(existingMetaTimer);
+            _metaDebounceTimers.delete(segmentationId);
+          }
+          _saveDebounceOptions.delete(segmentationId);
+
+          const ids = _segStudySeriesMap.get(segmentationId);
+          if (!ids) {
+            updatePersistenceStatus(servicesManager, 'synced', 'Segmentation deleted.');
+            destroyAdapterSegmentation(segmentationId);
+            return; // no study/series recorded — nothing to clean up
+          }
+          const { studyInstanceUID, seriesInstanceUID } = ids;
+          logSegmentationTimeline('segmentation-removed:delete-all-frames', {
+            segmentationId,
+            studyInstanceUID,
+            seriesInstanceUID,
+          });
+          updatePersistenceStatus(
+            servicesManager,
+            'dirty',
+            'Unsaved segmentation changes. Saving will start automatically.'
+          );
+          void deleteAllSegFrames(studyInstanceUID, seriesInstanceUID)
+            .then(() => {
+              updatePersistenceStatus(servicesManager, 'synced', 'Segmentation deleted.');
+              _segStudySeriesMap.delete(segmentationId);
+              destroyAdapterSegmentation(segmentationId);
+            })
+            .catch(error => {
+              console.error('[segmentation-mode] segmentation-removed:delete-all-frames:error', {
+                segmentationId,
+                error,
+              });
+              updatePersistenceStatus(
+                servicesManager,
+                'error',
+                error instanceof Error ? error.message : 'Failed to delete segmentation from backend.'
+              );
+            });
+        }
+      );
+      _unsubscribeSegmentationRemovedHandler = unsubSegRemovedHandler;
+
       const { unsubscribe: unsubSegRepresentationModifiedAutosave } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_REPRESENTATION_MODIFIED,
         ({ segmentationId }: { segmentationId: string }) => {
-          scheduleAutosave(segmentationId, 'all-timepoints', 'representation-modified');
+          // Use the separate metadata debounce so representation events (color, visibility, lock)
+          // do NOT reset the pixel-save debounce timer.
+          scheduleMetadataSave(segmentationId);
         }
       );
       _unsubscribeSegmentationRepresentationModifiedAutosave =
@@ -543,12 +782,39 @@ function modeFactory({ modeConfiguration }) {
       const { unsubscribe: unsubSegAdded } = segmentationService.subscribe(
         segmentationService.EVENTS.SEGMENTATION_ADDED,
         ({ segmentationId }: { segmentationId: string }) => {
-          if (getPhase(segmentationId) === 'armed') return;
+          const currentPhase = getPhase(segmentationId);
+          if (!_segStudySeriesMap.has(segmentationId)) {
+            const ids = getSegStudySeries(segmentationId, servicesManager);
+            if (ids) {
+              _segStudySeriesMap.set(segmentationId, ids);
+            }
+          }
+          segLoadLog('SEGMENTATION_ADDED:fired', {
+            segmentationId,
+            ...snapshotSegState(segmentationService, segmentationId),
+          });
+          if (currentPhase === 'armed') {
+            segLoadLog('SEGMENTATION_ADDED:skip-already-armed', { segmentationId });
+            return;
+          }
+          if (currentPhase === 'restoring' || currentPhase === 'creating') {
+            segLoadLog('SEGMENTATION_ADDED:skip-autoCreate-owns-restore', {
+              segmentationId,
+              currentPhase,
+            });
+            return;
+          }
+          segLoadLog('SEGMENTATION_ADDED:proceeding-with-restoreFrames', {
+            segmentationId,
+            currentPhase,
+          });
           setPhase(segmentationId, 'restoring');
           logSegmentationTimeline('segmentationAdded:begin-restore', {
             segmentationId,
           });
-          void restoreFrames(segmentationId, servicesManager)
+          const restoreAbortController = new AbortController();
+          _restoreAbortControllers.set(segmentationId, restoreAbortController);
+          void restoreFrames(segmentationId, servicesManager, restoreAbortController.signal)
             .catch(error => {
               setPhase(segmentationId, 'error');
               console.error('[segmentation-mode] restore:error', {
@@ -569,9 +835,17 @@ function modeFactory({ modeConfiguration }) {
               );
             })
             .finally(() => {
-              if (getPhase(segmentationId) === 'restoring') {
+              _restoreAbortControllers.delete(segmentationId);
+              const phaseBeforeArm = getPhase(segmentationId);
+              if (phaseBeforeArm === 'restoring') {
                 setPhase(segmentationId, 'armed');
               }
+              segLoadLog('SEGMENTATION_ADDED:restoreFrames-finally', {
+                segmentationId,
+                phaseBeforeArm,
+                phaseAfter: getPhase(segmentationId),
+                ...snapshotSegState(segmentationService, segmentationId),
+              });
               logSegmentationTimeline('segmentationAdded:restore-finished', {
                 segmentationId,
                 phase: getPhase(segmentationId),
@@ -592,6 +866,7 @@ function modeFactory({ modeConfiguration }) {
         (event: any) => {
           logSegmentationTimeline('event:viewport-data-changed', event);
           const viewportId = event?.viewportId ?? event?.detail?.viewportId;
+          segLoadLog('VIEWPORT_DATA_CHANGED:fired', { viewportId });
           if (viewportId) {
             void _tryAutoCreateForViewport(viewportId);
           }
@@ -628,6 +903,11 @@ function modeFactory({ modeConfiguration }) {
           _saveDebounceTimers.delete(segmentationId);
         }
         _saveDebounceOptions.delete(segmentationId);
+        const existingMeta = _metaDebounceTimers.get(segmentationId);
+        if (existingMeta) {
+          clearTimeout(existingMeta);
+          _metaDebounceTimers.delete(segmentationId);
+        }
 
         logDiag('manual full save fired', {
           segmentationId,
@@ -662,10 +942,18 @@ function modeFactory({ modeConfiguration }) {
 
       _unsubscribeSegmentModified?.();
       _unsubscribeSegmentModified = null;
+      _unsubscribeRepresentationColorSync?.();
+      _unsubscribeRepresentationColorSync = null;
+      _unsubscribeActiveSegmentColorSync?.();
+      _unsubscribeActiveSegmentColorSync = null;
 
       if (_onContourCompleted) {
         eventTarget.removeEventListener(toolEnums.Events.ANNOTATION_COMPLETED, _onContourCompleted);
         _onContourCompleted = null;
+      }
+      if (_onContourModeChanged) {
+        window.removeEventListener('medex:manual-contour-mode-changed', _onContourModeChanged);
+        _onContourModeChanged = null;
       }
 
       _unsubscribeSegmentDataModified?.();
@@ -678,14 +966,25 @@ function modeFactory({ modeConfiguration }) {
       _unsubscribeSegmentationAdded = null;
       _unsubscribeViewportDataChanged?.();
       _unsubscribeViewportDataChanged = null;
+      _unsubscribeSegmentationRemovedHandler?.();
+      _unsubscribeSegmentationRemovedHandler = null;
       destroyAdapterState();
       if (_onKeyDown) {
         window.removeEventListener('keydown', _onKeyDown);
         _onKeyDown = null;
       }
+      if (typeof window !== 'undefined') {
+        delete (window as any).__medexSegmentationTestApi;
+      }
       _saveDebounceTimers.forEach(t => clearTimeout(t));
       _saveDebounceTimers.clear();
       _saveDebounceOptions.clear();
+      _metaDebounceTimers.forEach(t => clearTimeout(t));
+      _metaDebounceTimers.clear();
+      _segStudySeriesMap.clear();
+      // Abort and clear any in-flight restores so they don't race with mode teardown.
+      _restoreAbortControllers.forEach(controller => controller.abort());
+      _restoreAbortControllers.clear();
 
       uiDialogService.hideAll();
       uiModalService.hide();

@@ -25,7 +25,6 @@ export const CustomDropdownMenuContent = () => {
     onSegmentationAdd,
     onSegmentationRemoveFromViewport,
     onSegmentationEdit,
-    onSegmentationDelete,
     exportOptions,
     activeSegmentation,
     activeSegmentationId,
@@ -68,11 +67,24 @@ export const CustomDropdownMenuContent = () => {
     onSegmentationDownloadRTSS: segmentationId => {
       commandsManager.run('downloadRTSS', { segmentationId });
     },
+    downloadNiftiSeg: () => {
+      commandsManager.run('downloadNiftiSeg');
+    },
+    downloadNiftiBundle: () => {
+      commandsManager.run('downloadNiftiBundle');
+    },
     onSegmentationDownload: segmentationId => {
       commandsManager.run('downloadSegmentation', { segmentationId });
     },
     downloadCSVSegmentationReport: segmentationId => {
       commandsManager.run('downloadCSVSegmentationReport', { segmentationId });
+    },
+    deleteSegmentation: segmentationId => {
+      commandsManager.run({
+        commandName: 'deleteSegmentation',
+        commandOptions: { segmentationId },
+        context: 'CORNERSTONE',
+      });
     },
   };
 
@@ -95,7 +107,7 @@ export const CustomDropdownMenuContent = () => {
       <DropdownMenuSub>
         <DropdownMenuSubTrigger className="pl-1">
           <Icons.Export className="text-foreground" />
-          <span className="pl-2">{t('Download & Export')}</span>
+          <span className="pl-2">{t('Download & PACS Push')}</span>
         </DropdownMenuSubTrigger>
         <DropdownMenuPortal>
           <DropdownMenuSubContent>
@@ -129,10 +141,28 @@ export const CustomDropdownMenuContent = () => {
             >
               {t('DICOM RTSS')}
             </DropdownMenuItem>
+            <DropdownMenuItem
+              data-cy="download-nifti-seg"
+              onClick={e => {
+                e.preventDefault();
+                actions.downloadNiftiSeg();
+              }}
+            >
+              {t('NIfTI SEG')}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              data-cy="download-nifti-bundle"
+              onClick={e => {
+                e.preventDefault();
+                actions.downloadNiftiBundle();
+              }}
+            >
+              {t('NIfTI IMG+SEG')}
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="flex items-center pl-0">
               <Icons.Export className="h-5 w-5" />
-              <span className="pl-1 pt-1">{t('Export')}</span>
+              <span className="pl-1 pt-1">{t('PACS Push')}</span>
             </DropdownMenuLabel>
             <DropdownMenuItem
               onClick={e => {
@@ -147,7 +177,12 @@ export const CustomDropdownMenuContent = () => {
         </DropdownMenuPortal>
       </DropdownMenuSub>
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => onSegmentationDelete(segmentationId)}>
+      <DropdownMenuItem
+        onClick={e => {
+          e.preventDefault();
+          actions.deleteSegmentation(segmentationId);
+        }}
+      >
         <Icons.Delete className="text-red-600" />
         <span className="pl-2 text-red-600">{t('Delete')}</span>
       </DropdownMenuItem>

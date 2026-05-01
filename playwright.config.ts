@@ -1,4 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
+import { config as loadEnv } from 'dotenv';
+import path from 'path';
+
+loadEnv({ path: path.resolve(__dirname, '.env.test') });
+
+const playwrightPort = Number(process.env.PLAYWRIGHT_PORT || process.env.OHIF_PORT || 3000);
+const appConfig = process.env.PLAYWRIGHT_APP_CONFIG || process.env.APP_CONFIG || 'config/e2e.js';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://localhost:${playwrightPort}`;
+const useManagedWebServer = !process.env.PLAYWRIGHT_BASE_URL;
 
 export default defineConfig({
   testDir: './tests',
@@ -12,7 +21,7 @@ export default defineConfig({
   globalTimeout: 800_000,
   timeout: 800_000,
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL,
     trace: 'on-first-retry',
     video: 'on',
     testIdAttribute: 'data-cy',
@@ -37,10 +46,12 @@ export default defineConfig({
     //  use: { ...devices['Desktop Safari'], deviceScaleFactor: 1 },
     //},
   ],
-  webServer: {
-    command: 'cross-env APP_CONFIG=config/e2e.js COVERAGE=true nyc yarn start',
-    url: 'http://localhost:3000',
-    reuseExistingServer: !process.env.CI,
-    timeout: 360_000,
-  },
+  webServer: useManagedWebServer
+    ? {
+        command: `cross-env OHIF_PORT=${playwrightPort} APP_CONFIG=${appConfig} COVERAGE=true nyc yarn start`,
+        url: `http://localhost:${playwrightPort}`,
+        reuseExistingServer: !process.env.CI,
+        timeout: 360_000,
+      }
+    : undefined,
 });

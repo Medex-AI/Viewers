@@ -1,7 +1,6 @@
-import { annotation } from '@cornerstonejs/tools';
+import { annotation, ToolGroupManager } from '@cornerstonejs/tools';
 
 const TOOL_NAME = 'ManualContour';
-const TOOL_GROUP_IDS = ['default', 'mpr', 'volume3d'];
 const FILL_OPACITY = 0.2;
 
 const rgbaToHex = (rgba: [number, number, number, number]): string => {
@@ -22,16 +21,25 @@ export const syncManualContourColor = (
   segmentationService: any
 ): void => {
   try {
-    const activeSegment = segmentationService.getActiveSegment(viewportId);
+    const segmentation = segmentationService.getSegmentation?.(segmentationId);
+    const activeSegment =
+      Object.values(segmentation?.segments ?? {}).find((segment: any) => segment?.active) ||
+      segmentationService.getActiveSegment(viewportId);
     // Segment indices are 1-based; 0/undefined/null means no active segment
-    if (!activeSegment?.segmentIndex) {
+    const segmentIndex = (activeSegment as any)?.segmentIndex;
+    if (!segmentIndex) {
       return;
     }
-    const color = segmentationService.getSegmentColor(
-      viewportId,
-      segmentationId,
-      activeSegment.segmentIndex
+    const viewportRepresentations =
+      segmentationService.getSegmentationRepresentations?.(viewportId, { segmentationId }) ??
+      segmentationService.getSegmentationRepresentations?.(viewportId) ??
+      [];
+    const viewportRepresentation = viewportRepresentations.find(
+      representation => representation.segmentationId === segmentationId
     );
+    const color =
+      viewportRepresentation?.segments?.[segmentIndex]?.color ||
+      segmentationService.getSegmentColor(viewportId, segmentationId, segmentIndex);
     if (!color) {
       return;
     }
@@ -41,20 +49,28 @@ export const syncManualContourColor = (
       (window as any).__oviActiveManualContourColor = hexColor;
     }
 
+    const isEraseMode =
+      typeof window !== 'undefined' && (window as any).__medexManualContourMode === 'erase';
+    const strokeColor = isEraseMode ? '#ffffff' : hexColor;
+
     // Apply the color to all tool groups used by the segmentation mode so that:
-    // - stroke color during drawing uses the active segment color
+    // - stroke color during drawing uses the active segment color (white in erase mode)
     // - fill color after completion uses the active segment color
-    TOOL_GROUP_IDS.forEach(toolGroupId => {
+    const toolGroupIds = ToolGroupManager.getAllToolGroups?.()
+      ?.map(toolGroup => toolGroup.id)
+      ?.filter(Boolean) ?? ['default', 'mpr', 'volume3d'];
+
+    toolGroupIds.forEach(toolGroupId => {
       const toolGroupStyles = annotation.config.style.getToolGroupToolStyles(toolGroupId) || {};
       const toolSpecificStyles = toolGroupStyles[TOOL_NAME] || {};
       annotation.config.style.setToolGroupToolStyles(toolGroupId, {
         ...toolGroupStyles,
         [TOOL_NAME]: {
           ...toolSpecificStyles,
-          color: hexColor,
-          colorHighlighted: hexColor,
-          colorSelected: hexColor,
-          fillColor: hexColor,
+          color: strokeColor,
+          colorHighlighted: strokeColor,
+          colorSelected: strokeColor,
+          fillColor: strokeColor,
           fillOpacity: FILL_OPACITY,
           renderFill: true,
         },

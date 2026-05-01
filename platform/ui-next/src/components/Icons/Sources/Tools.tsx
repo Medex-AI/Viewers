@@ -1808,6 +1808,41 @@ export const ToolFreehandThin = (props: IconProps) => (
   </svg>
 );
 
+export const ToolFreehandDashed = (props: IconProps) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 18 18"
+    {...props}
+  >
+    <g
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <ellipse
+        ry="1"
+        rx="1"
+        cy="4.24"
+        cx="14.31"
+        fill="currentColor"
+      />
+      <path
+        d="M 14.3 4.2 C 11.5 3.0, 8 3.0, 5.5 3.8 C 3.5 4.8, 2.5 6.5, 2.7 9.0 C 2.9 11.5, 4.0 13.5, 6.0 14.8 C 8.0 16.0, 11.0 15.8, 13.0 14.5 C 14.5 13.5, 15.5 12.0, 15.5 11.0"
+        strokeDasharray="1.5 1.5"
+      />
+      <ellipse
+        ry="1"
+        rx="1"
+        cy="11.0"
+        cx="15.52"
+        fill="currentColor"
+      />
+    </g>
+  </svg>
+);
+
 export const ToolFusionColor = (props: IconProps) => (
   <svg
     width="25px"

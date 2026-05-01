@@ -28,14 +28,15 @@ export function DeleteSegmentModal({
       <FooterAction className="mt-4">
         <FooterAction.Right>
           <FooterAction.Secondary onClick={hide}>Cancel</FooterAction.Secondary>
-          <FooterAction.Primary
+          <FooterAction.Secondary
+            className="border-red-700 bg-red-600 text-white hover:bg-red-700"
             onClick={() => {
               onConfirm();
               hide();
             }}
           >
             Delete
-          </FooterAction.Primary>
+          </FooterAction.Secondary>
         </FooterAction.Right>
       </FooterAction>
     </div>

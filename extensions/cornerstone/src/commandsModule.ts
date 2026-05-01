@@ -6,6 +6,8 @@ import {
   utilities as csUtils,
   Types as CoreTypes,
   BaseVolumeViewport,
+  metaData,
+  imageLoader,
 } from '@cornerstonejs/core';
 import {
   ToolGroupManager,
@@ -18,7 +20,7 @@ import * as cornerstoneTools from '@cornerstonejs/tools';
 import * as labelmapInterpolation from '@cornerstonejs/labelmap-interpolation';
 import { ONNXSegmentationController } from '@cornerstonejs/ai';
 
-import { Types as OhifTypes, utils } from '@ohif/core';
+import { DicomMetadataStore, Types as OhifTypes, utils } from '@ohif/core';
 import i18n from '@ohif/i18n';
 import {
   callInputDialogAutoComplete,
@@ -36,8 +38,24 @@ import { toolNames } from './initCornerstoneTools';
 import CornerstoneViewportDownloadForm from './utils/CornerstoneViewportDownloadForm';
 import { updateSegmentBidirectionalStats } from './utils/updateSegmentationStats';
 import { generateSegmentationCSVReport } from './utils/generateSegmentationCSVReport';
+import { setSegmentationPersistenceStatus } from './utils/segmentationPersistenceStatus';
 import { getUpdatedViewportsForSegmentation } from './utils/hydrationUtils';
 import DeleteSegmentModal from './components/DeleteSegmentModal';
+import DeleteSegmentationModal from './components/DeleteSegmentationModal';
+import {
+  buildNiftiBuffer,
+  gzipBuffer,
+  buildZipBuffer,
+  downloadBlob,
+} from '../../ovi-labs/src/utils/roiExport';
+import { readActiveSegmentationFrames } from '../../ovi-labs/src/utils/oviSegmentation';
+import { extractFrameTimingFromImageIds } from '../../ovi-labs/src/utils/dicomMetadataExtractor';
+import {
+  createBoundSegmentationDocument,
+  getBoundSegmentationDocument,
+  patchBoundLabel,
+  patchRemoveBoundLabel,
+} from '../../../medex/segmentation/src/persistence/segmentationContractClient';
 
 const { DefaultHistoryMemo } = csUtils.HistoryMemo;
 const toggleSyncFunctions = {
@@ -125,6 +143,53 @@ function commandsModule({
       segmentationId,
       segmentIndex: activeSegmentIndex,
     };
+  }
+
+  function _getSegmentationStudySeries(segmentation) {
+    const labelmapData = segmentation?.representationData?.[Enums.SegmentationRepresentations.Labelmap];
+    const referencedImageId = labelmapData?.referencedImageIds?.[0];
+    if (!referencedImageId) {
+      return null;
+    }
+
+    const instance =
+      DicomMetadataStore.getInstanceByImageId(referencedImageId) ||
+      metaData.get('instance', referencedImageId);
+    if (!instance?.StudyInstanceUID || !instance?.SeriesInstanceUID) {
+      return null;
+    }
+
+    return {
+      studyInstanceUID: instance.StudyInstanceUID,
+      seriesInstanceUID: instance.SeriesInstanceUID,
+    };
+  }
+
+  function _colorToHex(color = []) {
+    return `#${color
+      .slice(0, 3)
+      .map(value => Math.round(value).toString(16).padStart(2, '0'))
+      .join('')}`.toUpperCase();
+  }
+
+  async function _ensureBoundSegmentationDocument(segmentationId, segmentation, labels) {
+    if (getBoundSegmentationDocument(segmentationId)) {
+      return true;
+    }
+
+    const ids = _getSegmentationStudySeries(segmentation);
+    if (!ids) {
+      return false;
+    }
+
+    await createBoundSegmentationDocument({
+      localSegmentationId: segmentationId,
+      studyInstanceUID: ids.studyInstanceUID,
+      seriesInstanceUID: ids.seriesInstanceUID,
+      label: segmentation.label || 'Segmentation',
+      labels,
+    });
+    return true;
   }
 
   const actions = {
@@ -475,7 +540,10 @@ function commandsModule({
     removeMeasurement: ({ uid, nearbyToolData, value, element }) => {
       const resolvedUID = uid ?? nearbyToolData?.annotationUID ?? value?.annotationUID;
 
-      if (nearbyToolData?.annotationUID && annotation.state.getAnnotation(nearbyToolData.annotationUID)) {
+      if (
+        nearbyToolData?.annotationUID &&
+        annotation.state.getAnnotation(nearbyToolData.annotationUID)
+      ) {
         annotation.state.removeAnnotation(nearbyToolData.annotationUID);
         if (element) {
           cstUtils.triggerAnnotationRender(element);
@@ -749,6 +817,20 @@ function commandsModule({
       toolGroupIds.forEach(toolGroupId => {
         actions.setToolActive({ toolName, toolGroupId });
       });
+    },
+    setManualContourMode: ({ mode = 'draw' }) => {
+      const contourMode = mode === 'erase' ? 'erase' : 'draw';
+      if (typeof window !== 'undefined') {
+        (window as any).__medexManualContourMode = contourMode;
+        window.dispatchEvent(
+          new CustomEvent('medex:manual-contour-mode-changed', {
+            detail: { mode: contourMode },
+          })
+        );
+      }
+      const { toolbarService } = servicesManager.services as any;
+      const viewportId = viewportGridService.getActiveViewportId?.();
+      toolbarService?.refreshToolbarState?.({ viewportId });
     },
     setToolActive: ({ toolName, toolGroupId = null }) => {
       const { viewports } = viewportGridService.getState();
@@ -1046,10 +1128,14 @@ function commandsModule({
 
       const volumeId = dynamicDisplaySet.displaySetInstanceUID;
       const totalTimes = dynamicDisplaySet.dynamicVolumeInfo.timePoints.length;
-      const volume = cache.getVolume(volumeId, true) as { dimensionGroupNumber?: number } | undefined;
+      const volume = cache.getVolume(volumeId, true) as
+        | { dimensionGroupNumber?: number }
+        | undefined;
 
       const currentTime =
-        volume?.dimensionGroupNumber || dynamicDisplaySet.dynamicVolumeInfo.dimensionGroupNumber || 1;
+        volume?.dimensionGroupNumber ||
+        dynamicDisplaySet.dynamicVolumeInfo.dimensionGroupNumber ||
+        1;
       const nextTime = Math.max(1, Math.min(totalTimes, currentTime + direction));
 
       if (nextTime === currentTime) {
@@ -1300,7 +1386,7 @@ function commandsModule({
           segments: options.createInitialSegment
             ? {
                 1: {
-                  label: `${i18n.t('Segment')} 1`,
+                  label: 'Label 1',
                   active: true,
                 },
               }
@@ -1311,6 +1397,12 @@ function commandsModule({
       await segmentationService.addSegmentationRepresentation(viewportId, {
         segmentationId,
         type: Enums.SegmentationRepresentations.Labelmap,
+      });
+
+      segmentationService.setActiveSegmentation(viewportId, generatedSegmentationId);
+      setSegmentationPersistenceStatus(viewportId, {
+        kind: 'synced',
+        message: 'Ready for new segmentation.',
       });
 
       return generatedSegmentationId;
@@ -1436,6 +1528,98 @@ function commandsModule({
     },
 
     /**
+     * Downloads the active segmentation as a NIfTI label map (label.nii.gz).
+     */
+    downloadNiftiSegCommand: async () => {
+      const { cornerstoneViewportService, uiNotificationService } = servicesManager.services;
+      const { activeViewportId } = viewportGridService.getState();
+      if (!activeViewportId) return;
+      try {
+        const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+        const imageIds: string[] = viewport?.getImageIds?.() ?? [];
+        const imagePlane = imageIds[0] ? metaData.get('imagePlaneModule', imageIds[0]) ?? {} : {};
+        const spacing = {
+          row: (imagePlane.rowPixelSpacing ?? imagePlane.columnPixelSpacing ?? 1) as number,
+          column: (imagePlane.columnPixelSpacing ?? imagePlane.rowPixelSpacing ?? 1) as number,
+        };
+        const { frameTimeMs } = extractFrameTimingFromImageIds(imageIds);
+        const labelFrames = await readActiveSegmentationFrames({
+          servicesManager,
+          viewportId: activeViewportId,
+        });
+        if (!labelFrames.length) {
+          uiNotificationService?.show?.({ title: 'NIfTI Export', message: 'No segmentation data found.', type: 'warning', duration: 3000 });
+          return;
+        }
+        const nifti = buildNiftiBuffer({
+          frames: labelFrames.map(f => new Uint8Array(f.scalarData)),
+          width: labelFrames[0].width,
+          height: labelFrames[0].height,
+          spacing,
+          frameTimeMs,
+        });
+        const gz = await gzipBuffer(nifti);
+        downloadBlob(new Blob([gz], { type: 'application/gzip' }), 'label.nii.gz');
+      } catch (err) {
+        console.error('[NIfTI export] error', err);
+        uiNotificationService?.show?.({ title: 'NIfTI Export Failed', message: err instanceof Error ? err.message : 'Unknown error', type: 'error', duration: 5000 });
+      }
+    },
+
+    /**
+     * Downloads image + segmentation as a ZIP bundle (image.nii.gz + label.nii.gz).
+     */
+    downloadNiftiBundleCommand: async () => {
+      const { cornerstoneViewportService, uiNotificationService } = servicesManager.services;
+      const { activeViewportId } = viewportGridService.getState();
+      if (!activeViewportId) return;
+      try {
+        const viewport = cornerstoneViewportService.getCornerstoneViewport(activeViewportId);
+        const imageIds: string[] = viewport?.getImageIds?.() ?? [];
+        const imagePlane = imageIds[0] ? metaData.get('imagePlaneModule', imageIds[0]) ?? {} : {};
+        const spacing = {
+          row: (imagePlane.rowPixelSpacing ?? imagePlane.columnPixelSpacing ?? 1) as number,
+          column: (imagePlane.columnPixelSpacing ?? imagePlane.rowPixelSpacing ?? 1) as number,
+        };
+        const { frameTimeMs } = extractFrameTimingFromImageIds(imageIds);
+        const files: { name: string; data: ArrayBuffer }[] = [];
+
+        // image.nii.gz
+        const imageFrames: Array<Int16Array | Uint16Array | Uint8Array | Float32Array> = [];
+        let imgW = 0, imgH = 0;
+        for (const id of imageIds) {
+          const image = cache.getImage(id) ?? await imageLoader.loadAndCacheImage(id);
+          const raw = image?.voxelManager?.getScalarData?.() ?? image?.getPixelData?.();
+          if (!raw) continue;
+          imgW = image.columns ?? image.width ?? imgW;
+          imgH = image.rows ?? image.height ?? imgH;
+          imageFrames.push(raw.slice() as Int16Array);
+        }
+        if (imageFrames.length && imgW && imgH) {
+          const nifti = buildNiftiBuffer({ frames: imageFrames, width: imgW, height: imgH, spacing, frameTimeMs });
+          files.push({ name: 'image.nii.gz', data: await gzipBuffer(nifti) });
+        }
+
+        // label.nii.gz
+        const labelFrames = await readActiveSegmentationFrames({ servicesManager, viewportId: activeViewportId });
+        if (labelFrames.length) {
+          const nifti = buildNiftiBuffer({ frames: labelFrames.map(f => new Uint8Array(f.scalarData)), width: labelFrames[0].width, height: labelFrames[0].height, spacing, frameTimeMs });
+          files.push({ name: 'label.nii.gz', data: await gzipBuffer(nifti) });
+        }
+
+        if (!files.length) {
+          uiNotificationService?.show?.({ title: 'NIfTI Export', message: 'Nothing to export.', type: 'warning', duration: 3000 });
+          return;
+        }
+        downloadBlob(new Blob([buildZipBuffer(files)], { type: 'application/zip' }), 'segmentation_export.zip');
+        uiNotificationService?.show?.({ title: 'Export Complete', message: files.map(f => f.name).join(', '), type: 'success', duration: 3000 });
+      } catch (err) {
+        console.error('[NIfTI bundle export] error', err);
+        uiNotificationService?.show?.({ title: 'NIfTI Export Failed', message: err instanceof Error ? err.message : 'Unknown error', type: 'error', duration: 5000 });
+      }
+    },
+
+    /**
      * Sets the style for a segmentation
      * @param props.segmentationId - The ID of the segmentation
      * @param props.type - The type of style
@@ -1459,6 +1643,9 @@ function commandsModule({
 
       const onConfirm = () => {
         segmentationService.removeSegment(segmentationId, segmentIndex);
+        patchRemoveBoundLabel({ localSegmentationId: segmentationId, segmentIndex }).catch(error => {
+          console.error('[segmentation-contract] failed to persist label delete', error);
+        });
       };
 
       if (uiModalService) {
@@ -1477,12 +1664,37 @@ function commandsModule({
     },
 
     /**
-     * Deletes an entire segmentation
-     * @param props.segmentationId - The ID of the segmentation to delete
+     * Deletes an entire segmentation — shows confirmation modal, removes from
+     * viewport immediately, then removes from state so SEGMENTATION_MODIFIED
+     * fires while the segmentation is still resolvable for the backend cleanup.
      */
     deleteSegmentationCommand: ({ segmentationId }) => {
-      const { segmentationService } = servicesManager.services;
-      segmentationService.remove(segmentationId);
+      const { segmentationService, uiModalService, viewportGridService } =
+        servicesManager.services;
+      const segmentation = segmentationService.getSegmentation(segmentationId);
+
+      const onConfirm = () => {
+        // 1. Remove representation from viewport first so the canvas clears immediately.
+        const viewportId = viewportGridService.getActiveViewportId();
+        segmentationService.removeSegmentationRepresentations(viewportId, { segmentationId });
+        // 2. Remove the segmentation object — fires SEGMENTATION_MODIFIED which the mode
+        //    picks up to delete backend frames via the whole-seg-removed handler.
+        segmentationService.remove(segmentationId);
+      };
+
+      if (uiModalService) {
+        uiModalService.show({
+          title: 'Delete Segmentation',
+          content: DeleteSegmentationModal,
+          contentProps: {
+            onConfirm,
+            segmentationLabel: segmentation?.label,
+          },
+        });
+        return;
+      }
+
+      onConfirm();
     },
 
     /**
@@ -1574,6 +1786,20 @@ function commandsModule({
         defaultValue: segment.label,
       }).then(label => {
         segmentationService.setSegmentLabel(segmentationId, segmentIndex, label);
+        const persistRename = async () => {
+          const bound = await _ensureBoundSegmentationDocument(segmentationId, segmentation, {
+            [segmentIndex]: { name: label },
+          });
+          if (!bound) {
+            return;
+          }
+
+          await patchBoundLabel({ localSegmentationId: segmentationId, segmentIndex, name: label });
+        };
+
+        persistRename().catch(error => {
+          console.error('[segmentation-contract] failed to persist label rename', error);
+        });
       });
     },
 
@@ -1618,6 +1844,32 @@ function commandsModule({
           onSave: newRgbaColor => {
             const color = [newRgbaColor.r, newRgbaColor.g, newRgbaColor.b, newRgbaColor.a * 255.0];
             segmentationService.setSegmentColor(viewportId, segmentationId, segmentIndex, color);
+
+            const segmentation = segmentationService.getSegmentation(segmentationId);
+            const segment = segmentation?.segments?.[segmentIndex];
+            const persistColor = async () => {
+              if (!segmentation) {
+                return;
+              }
+
+              const hexColor = _colorToHex(color);
+              const bound = await _ensureBoundSegmentationDocument(segmentationId, segmentation, {
+                [segmentIndex]: { name: segment?.label, color: hexColor },
+              });
+              if (!bound) {
+                return;
+              }
+
+              await patchBoundLabel({
+                localSegmentationId: segmentationId,
+                segmentIndex,
+                color: hexColor,
+              });
+            };
+
+            persistColor().catch(error => {
+              console.error('[segmentation-contract] failed to persist label color', error);
+            });
           },
         },
       });
@@ -1910,6 +2162,9 @@ function commandsModule({
     setToolActiveToolbar: {
       commandFn: actions.setToolActiveToolbar,
     },
+    setManualContourMode: {
+      commandFn: actions.setManualContourMode,
+    },
     setToolEnabled: {
       commandFn: actions.setToolEnabled,
     },
@@ -2065,6 +2320,12 @@ function commandsModule({
     },
     downloadRTSS: {
       commandFn: actions.downloadRTSSCommand,
+    },
+    downloadNiftiSeg: {
+      commandFn: actions.downloadNiftiSegCommand,
+    },
+    downloadNiftiBundle: {
+      commandFn: actions.downloadNiftiBundleCommand,
     },
     setSegmentationStyle: {
       commandFn: actions.setSegmentationStyleCommand,

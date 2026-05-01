@@ -25,7 +25,14 @@
       "@ohif/extension-cornerstone-dicom-seg": ["./extensions/cornerstone-dicom-seg/src"],
       "@ohif/extension-cornerstone": ["./extensions/cornerstone/src"],
       "@ohif/extension-dicom-pdf": ["./extensions/dicom-pdf/src"],
-      "@state": ["./platform/app/src/state"]
+      "@state": ["./platform/app/src/state"],
+      "@medex/segmentation": ["./medex/segmentation/src"],
+      "@medex/inference": ["./medex/inference/src"],
+      "@medex/reporting": ["./medex/reporting/src"],
+      "@medex/utils": ["./medex/utils/src"],
+      "@medex/plot": ["./medex/plot/src"],
+      "@medex/ovi-labs": ["./specialties/ovi-labs/src"],
+      "@medex/cvi-labs": ["./specialties/cvi-labs/src"]
     }
   },
   "include": [
@@ -33,6 +40,8 @@
     "platform/**/public/**/*",
     "extensions/**/src/**/*",
     "modes/**/src/**/*",
+    "medex/**/src/**/*",
+    "specialties/**/src/**/*",
     "tests/**/*"
   ],
   "exclude": ["node_modules", "dist"]

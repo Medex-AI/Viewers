@@ -9,6 +9,7 @@ import { getTMTVModalityUnit } from './getTMTVModalityUnit';
 import { clearAllAnnotations } from './clearAllAnnotations';
 import { scrollVolumeViewport } from './scrollVolumeViewport';
 import { attemptAction } from './attemptAction';
+import { loginAs } from './loginAs';
 
 export {
   visitStudy,
@@ -23,4 +24,5 @@ export {
   clearAllAnnotations,
   scrollVolumeViewport,
   attemptAction,
+  loginAs,
 };

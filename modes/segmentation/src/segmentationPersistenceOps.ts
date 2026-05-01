@@ -1,13 +1,47 @@
 import { cache, imageLoader } from '@cornerstonejs/core';
 import { Enums as toolEnums, segmentation as cstSegmentation } from '@cornerstonejs/tools';
 import { DicomMetadataStore } from '@ohif/core';
-import { saveSegFrame, loadSegFrames, deleteSegFrame } from './segmentationStorage';
+import { saveSegFrame, loadSegFrames, deleteSegFrame, deleteSegFrames } from './segmentationStorage';
 import { setSegmentationPersistenceStatus } from '../../../extensions/cornerstone/src/utils/segmentationPersistenceStatus';
 import { hexToRgba255, rgbaToHex } from '../../../extensions/ovi-labs/src/utils/colorUtils';
 import {
   getPhase,
   setPhase,
 } from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
+import {
+  bindSegmentationDocument,
+  listSegmentationDocuments,
+} from '../../../medex/segmentation/src/persistence/segmentationContractClient';
+
+// ─── Timestamped debug logger ─────────────────────────────────────────────────
+
+const _t0 = performance.now();
+export const segLoadLog = (event: string, data?: Record<string, unknown>) => {
+  const ms = (performance.now() - _t0).toFixed(1);
+  console.log(`[seg-autoload | +${ms}ms] ${event}`, data ?? '');
+};
+
+export const snapshotSegState = (segmentationService: any, segmentationId: string) => {
+  try {
+    const seg = segmentationService?.getSegmentation?.(segmentationId);
+    const segments = seg?.segments ?? {};
+    const segmentIndices = Object.keys(segments)
+      .map(Number)
+      .filter(i => segments[i]);
+    const labelmapData = seg?.representationData?.[toolEnums.SegmentationRepresentations.Labelmap];
+    return {
+      phase: getPhase(segmentationId),
+      label: seg?.label,
+      segmentCount: segmentIndices.length,
+      segmentIndices,
+      segmentLabels: segmentIndices.map(i => segments[i]?.label ?? null),
+      hasLabelmapData: Boolean(labelmapData),
+      labelmapImageCount: (labelmapData as any)?.imageIds?.length ?? 0,
+    };
+  } catch {
+    return { phase: getPhase(segmentationId), error: 'snapshot-failed' };
+  }
+};
 
 export interface AutoCreateState {
   autoCreateDoneDisplaySetUIDs: Set<string>;
@@ -199,12 +233,32 @@ const addSegmentationRepresentationAndConfirm = async (
   viewportId: string,
   segmentationId: string
 ): Promise<boolean> => {
+  segLoadLog('addSegRepresentation:START', { viewportId, segmentationId });
   await segmentationService.addSegmentationRepresentation(viewportId, {
     segmentationId,
     type: toolEnums.SegmentationRepresentations.Labelmap,
   });
+  segLoadLog('addSegRepresentation:addRepresentation-returned', { viewportId, segmentationId });
 
-  return viewportHasSegmentationRepresentation(segmentationService, viewportId, segmentationId);
+  // For dynamic volumes the state update happens asynchronously after the
+  // addSegmentationRepresentation call returns. Poll briefly before giving up.
+  for (let i = 0; i < 20; i++) {
+    const confirmed = viewportHasSegmentationRepresentation(
+      segmentationService,
+      viewportId,
+      segmentationId
+    );
+    segLoadLog('addSegRepresentation:poll', { viewportId, segmentationId, attempt: i, confirmed });
+    if (confirmed) return true;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  segLoadLog('addSegRepresentation:unconfirmed-continuing', { viewportId, segmentationId });
+  // Dynamic volume labelmaps can be attached through the volume-viewport path
+  // without appearing in getSegmentationRepresentations(viewportId). The
+  // representation poll is diagnostic only; restoration can safely proceed
+  // once addSegmentationRepresentation has returned and the labelmap volume
+  // has been registered in Cornerstone state.
+  return true;
 };
 
 const forceRenderViewportAfterSegmentationRepresentation = (
@@ -314,24 +368,65 @@ export const buildPersistedLabelMap = (segmentationId: string, servicesManager: 
   const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
 
   return Object.fromEntries(
-    Object.entries(segState?.segments || {}).map(([segmentIndex, segment]: [string, any]) => [
-      Number(segmentIndex),
-      {
-        labelId: String(segmentIndex),
-        labelName: segment?.label || `Segment ${segmentIndex}`,
-        labelColor: rgbaToHex(
-          activeViewportId
-            ? segmentationService.getSegmentColor?.(
-                activeViewportId,
-                segmentationId,
-                Number(segmentIndex)
-              )
-            : null
-        ),
-        labelLocked: Boolean(segment?.locked),
-      },
-    ])
+    Object.entries(segState?.segments || {})
+      .filter(([, segment]: [string, any]) => Boolean(segment))
+      .map(([segmentIndex, segment]: [string, any]) => [
+        Number(segmentIndex),
+        {
+          labelId: String(segmentIndex),
+          labelName: segment?.label || `Label ${segmentIndex}`,
+          labelColor: rgbaToHex(
+            activeViewportId
+              ? segmentationService.getSegmentColor?.(
+                  activeViewportId,
+                  segmentationId,
+                  Number(segmentIndex)
+                )
+              : null
+          ),
+          labelLocked: Boolean(segment?.locked),
+        },
+      ])
   );
+};
+
+export const buildLabelMapFromSegmentationDocument = (
+  document?: { labels?: Record<string, { name: string; color?: string; locked?: boolean }> }
+) => {
+  const labelMap: Record<
+    number,
+    { labelId: string; labelName: string; labelColor: string; labelLocked?: boolean }
+  > = {};
+
+  if (!document?.labels) {
+    return labelMap;
+  }
+
+  for (const [segmentIndex, label] of Object.entries(document.labels)) {
+    labelMap[Number(segmentIndex)] = {
+      labelId: String(segmentIndex),
+      labelName: label.name,
+      labelColor: label.color || '#FFFFFF',
+      labelLocked: Boolean(label.locked),
+    };
+  }
+
+  return labelMap;
+};
+
+export const sanitizeMaskDataForPersistedLabels = (
+  data: ArrayLike<number>,
+  labelMap: Record<number, unknown>
+): Uint8Array => {
+  const allowedSegmentIndices = new Set(Object.keys(labelMap).map(Number));
+  const result = new Uint8Array(data.length);
+
+  for (let i = 0; i < data.length; i++) {
+    const value = data[i];
+    result[i] = allowedSegmentIndices.has(value) ? value : 0;
+  }
+
+  return result;
 };
 
 export const applySavedFramesToLabelmapVolume = (
@@ -516,6 +611,64 @@ const writeVolumeSliceScalarData = (
   }
 };
 
+/**
+ * Return the study/series UIDs for a currently live segmentation.
+ * Returns null if the segmentation or its labelmap metadata is unavailable.
+ */
+export const getSegStudySeries = (
+  segmentationId: string,
+  servicesManager: any
+): { studyInstanceUID: string; seriesInstanceUID: string } | null => {
+  const { segmentationService } = servicesManager.services;
+  const segState = segmentationService.getSegmentation(segmentationId);
+  if (!segState) return null;
+  const labelmapData = segState.representationData?.[
+    toolEnums.SegmentationRepresentations.Labelmap
+  ] as { referencedImageIds?: string[] } | undefined;
+  const refImageId = labelmapData?.referencedImageIds?.[0];
+  if (!refImageId) return null;
+  const instance = DicomMetadataStore.getInstanceByImageId(refImageId);
+  if (!instance?.StudyInstanceUID || !instance?.SeriesInstanceUID) return null;
+  return {
+    studyInstanceUID: instance.StudyInstanceUID,
+    seriesInstanceUID: instance.SeriesInstanceUID,
+  };
+};
+
+/**
+ * Load all stored frames for a series from the backend and delete each one.
+ * Used when the whole segmentation has been removed from the viewer.
+ */
+export const deleteAllSegFrames = async (
+  studyInstanceUID: string,
+  seriesInstanceUID: string
+): Promise<void> => {
+  try {
+    await deleteSegFrames({ studyInstanceUID, seriesInstanceUID });
+  } catch (error) {
+    console.warn('[segmentation-mode] bulk segmentation frame delete failed', error);
+  }
+
+  let frames: Awaited<ReturnType<typeof loadSegFrames>> = [];
+  try {
+    frames = await loadSegFrames(studyInstanceUID, seriesInstanceUID);
+  } catch (error) {
+    console.warn('[segmentation-mode] failed to enumerate segmentation frames for cleanup', error);
+    return;
+  }
+
+  for (const frame of frames) {
+    try {
+      await deleteSegFrame({ studyInstanceUID, seriesInstanceUID, frameKey: frame.frameKey });
+    } catch (error) {
+      console.warn('[segmentation-mode] failed to delete segmentation frame during cleanup', {
+        frameKey: frame.frameKey,
+        error,
+      });
+    }
+  }
+};
+
 /** Read labelmap frames for a segmentation and save them to the backend. */
 export const saveAllFrames = async (
   segmentationId: string,
@@ -598,7 +751,8 @@ export const saveAllFrames = async (
     for (const snapshot of snapshots) {
       const stableFrameKey =
         getStableFrameKey(snapshot.referencedImageId) || snapshot.referencedImageId;
-      const hasData = snapshot.maskData.some((v: number) => v !== 0);
+        const frameData = sanitizeMaskDataForPersistedLabels(snapshot.maskData, labelMap);
+        const hasData = frameData.some((v: number) => v !== 0);
 
       if (!hasData) {
         logSegmentationTimeline(
@@ -629,7 +783,7 @@ export const saveAllFrames = async (
         frameNumber: snapshot.frameNumber,
         width: snapshot.width,
         height: snapshot.height,
-        maskData: new Uint8Array(snapshot.maskData),
+        maskData: frameData,
         labelMap,
         segmentationLabel,
       });
@@ -663,7 +817,8 @@ export const saveAllFrames = async (
           sliceScalarData && sliceScalarData.length === sliceLength
             ? new Uint8Array(sliceScalarData)
             : volumeScalarData.slice(offset, offset + sliceLength);
-        const nonZeroCount = countNonZeroPixels(frameData);
+        const sanitizedFrameData = sanitizeMaskDataForPersistedLabels(frameData, labelMap);
+        const nonZeroCount = countNonZeroPixels(sanitizedFrameData);
         const hasData = nonZeroCount > 0;
 
         if (!hasData) {
@@ -692,7 +847,7 @@ export const saveAllFrames = async (
           frameNumber: getFrameNumberFromImageId(referencedImageId),
           width,
           height,
-          maskData: new Uint8Array(frameData),
+          maskData: sanitizedFrameData,
           labelMap,
           segmentationLabel,
         });
@@ -722,7 +877,8 @@ export const saveAllFrames = async (
       const scalarData = labelmapImage?.voxelManager?.getScalarData?.();
       if (!scalarData) continue;
 
-      const hasData = scalarData.some((v: number) => v !== 0);
+      const frameData = sanitizeMaskDataForPersistedLabels(scalarData, labelMap);
+      const hasData = frameData.some((v: number) => v !== 0);
       if (!hasData) {
         logSegmentationTimeline(
           deleteEmptyFrames
@@ -757,7 +913,7 @@ export const saveAllFrames = async (
         frameNumber: getFrameNumberFromImageId(referencedImageId),
         width,
         height,
-        maskData: new Uint8Array(scalarData),
+        maskData: frameData,
         labelMap,
         segmentationLabel,
       });
@@ -824,9 +980,15 @@ export const getManualSaveSegmentationId = (servicesManager: any): string | null
 /** Restore previously saved frames into a freshly created segmentation's labelmap. */
 export const restoreFrames = async (
   segmentationId: string,
-  servicesManager: any
+  servicesManager: any,
+  signal?: AbortSignal
 ): Promise<void> => {
   const { segmentationService } = servicesManager.services;
+  segLoadLog('restoreFrames:ENTER', {
+    segmentationId,
+    ...snapshotSegState(segmentationService, segmentationId),
+    caller: new Error().stack?.split('\n')[2]?.trim(),
+  });
   logSegmentationTimeline('restoreFrames:start', {
     segmentationId,
     hasDynamicSegmentation: segmentationService.hasDynamicSegmentation?.(segmentationId) || false,
@@ -860,6 +1022,14 @@ export const restoreFrames = async (
     return;
   }
 
+  segLoadLog('restoreFrames:backend-fetch-start', {
+    segmentationId,
+    studyInstanceUID,
+    seriesInstanceUID,
+    labelmapImageCount: labelmapImageIds.length,
+    referencedImageCount: referencedImageIds.length,
+    phase: getPhase(segmentationId),
+  });
   console.warn('[segmentation-load-debug] restoreFrames:load-start', {
     segmentationId,
     studyInstanceUID,
@@ -868,6 +1038,16 @@ export const restoreFrames = async (
     referencedImageCount: referencedImageIds.length,
   });
   const saved = await loadSegFramesWithTimeout(studyInstanceUID, seriesInstanceUID);
+  segLoadLog('restoreFrames:backend-fetch-done', {
+    segmentationId,
+    phase: getPhase(segmentationId),
+    ...summarizeSavedFrames(saved),
+    labelMapSample: saved.slice(0, 3).map(f => ({
+      frameKey: f.frameKey,
+      labelMapKeys: Object.keys(f.labelMap ?? {}),
+      segmentationLabel: f.segmentationLabel,
+    })),
+  });
   console.warn('[segmentation-load-debug] restoreFrames:load-done', {
     segmentationId,
     studyInstanceUID,
@@ -901,7 +1081,21 @@ export const restoreFrames = async (
     });
   }
 
+  segLoadLog('restoreFrames:merged-label-map', {
+    segmentationId,
+    phase: getPhase(segmentationId),
+    mergedLabelMapKeys: Object.keys(mergedLabelMap),
+    persistedSegmentationLabel,
+    savedCount: saved.length,
+  });
+
   // Add segments matching the stored label map (zero segments if no data)
+  // Guard: if the restore was aborted (e.g., user deleted segments while backend fetch was
+  // in-flight), do not inject stale segment metadata back into the in-memory state.
+  if (signal?.aborted) {
+    logSegmentationTimeline('restoreFrames:aborted-before-segment-add', { segmentationId });
+    return;
+  }
   const sortedSegmentIndices = Object.keys(mergedLabelMap)
     .map(Number)
     .sort((a, b) => a - b);
@@ -1085,6 +1279,13 @@ export const restoreFrames = async (
       'Checked backend state. No saved segmentation was loaded.'
     );
   }
+
+  segLoadLog('restoreFrames:EXIT', {
+    segmentationId,
+    ...snapshotSegState(servicesManager.services.segmentationService, segmentationId),
+    modifiedIndices,
+    savedCount: saved.length,
+  });
 };
 
 // ─── Auto-create / restore controller ────────────────────────────────────────
@@ -1131,6 +1332,8 @@ export const tryAutoCreateSegmentationFromBackend = async (
 ): Promise<void> => {
   if (!viewportId) return;
 
+  segLoadLog('autoCreate:ENTER', { viewportId });
+
   const {
     segmentationService,
     displaySetService,
@@ -1140,12 +1343,20 @@ export const tryAutoCreateSegmentationFromBackend = async (
 
   const { viewports } = viewportGridService.getState();
   const viewport = viewports?.get(viewportId);
-  if (!viewport?.displaySetInstanceUIDs?.length) return;
+  if (!viewport?.displaySetInstanceUIDs?.length) {
+    segLoadLog('autoCreate:SKIP-no-display-set-uids', { viewportId });
+    return;
+  }
 
   const displaySetInstanceUID = viewport.displaySetInstanceUIDs[0];
   const viewportRepresentations =
     segmentationService.getSegmentationRepresentations?.(viewportId) ?? [];
   if (viewportRepresentations.length) {
+    segLoadLog('autoCreate:SKIP-existing-representation', {
+      viewportId,
+      displaySetInstanceUID,
+      representationCount: viewportRepresentations.length,
+    });
     logSegmentationTimeline('autoCreate:skip-existing-viewport-representation', {
       viewportId,
       displaySetInstanceUID,
@@ -1181,6 +1392,7 @@ export const tryAutoCreateSegmentationFromBackend = async (
 
   const cornerstoneViewport = cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
   if (!cornerstoneViewport) {
+    segLoadLog('autoCreate:SKIP-no-cornerstone-viewport', { viewportId, displaySetInstanceUID });
     logSegmentationTimeline('autoCreate:skip-cornerstone-viewport-not-ready', {
       viewportId,
       displaySetInstanceUID,
@@ -1188,6 +1400,7 @@ export const tryAutoCreateSegmentationFromBackend = async (
     });
     return;
   }
+  segLoadLog('autoCreate:cornerstone-viewport-ready', { viewportId, displaySetInstanceUID });
 
   // Restore existing in-memory segmentation for this display set if one exists
   const existingSegmentationId = findExistingSegmentationForDisplaySet(
@@ -1301,6 +1514,7 @@ export const tryAutoCreateSegmentationFromBackend = async (
     const seriesInstanceUID = displaySet.SeriesInstanceUID;
 
     let saved: Awaited<ReturnType<typeof loadSegFrames>> = [];
+    let metadataDocument: Awaited<ReturnType<typeof listSegmentationDocuments>>[number] | undefined;
     try {
       if (studyInstanceUID && seriesInstanceUID) {
         updatePersistenceStatus(
@@ -1308,6 +1522,12 @@ export const tryAutoCreateSegmentationFromBackend = async (
           'loading',
           'Checking backend for saved segmentation...'
         );
+        segLoadLog('autoCreate:backend-prefetch-START', {
+          viewportId,
+          segmentationId,
+          phase: getPhase(segmentationId),
+          isDynamicVolume: Boolean(displaySet.isDynamicVolume),
+        });
         console.warn('[segmentation-load-debug] autoCreate:backend-prefetch-start', {
           viewportId,
           displaySetInstanceUID,
@@ -1317,7 +1537,24 @@ export const tryAutoCreateSegmentationFromBackend = async (
           imageIdCount: displaySet.imageIds?.length || 0,
           timePointCount: displaySet.dynamicVolumeInfo?.timePoints?.length || 0,
         });
+        const metadataDocuments = await listSegmentationDocuments({
+          studyInstanceUID,
+          seriesInstanceUID,
+        });
+        metadataDocument = metadataDocuments[0];
         saved = await loadSegFramesWithTimeout(studyInstanceUID, seriesInstanceUID);
+        segLoadLog('autoCreate:backend-prefetch-DONE', {
+          viewportId,
+          segmentationId,
+          phase: getPhase(segmentationId),
+          savedCount: saved.length,
+          ...summarizeSavedFrames(saved),
+          labelMapSample: saved.slice(0, 3).map(f => ({
+            frameKey: f.frameKey,
+            labelMapKeys: Object.keys(f.labelMap ?? {}),
+            segmentationLabel: f.segmentationLabel,
+          })),
+        });
         console.warn('[segmentation-load-debug] autoCreate:backend-prefetch-done', {
           viewportId,
           displaySetInstanceUID,
@@ -1344,7 +1581,7 @@ export const tryAutoCreateSegmentationFromBackend = async (
       );
     }
 
-    if (!saved.length) {
+    if (!saved.length && !metadataDocument) {
       console.warn('[segmentation-load-debug] autoCreate:no-saved-frames-create-empty', {
         viewportId,
         displaySetInstanceUID,
@@ -1409,10 +1646,25 @@ export const tryAutoCreateSegmentationFromBackend = async (
       { labelId: string; labelName: string; labelColor: string; labelLocked?: boolean }
     > = {};
     const persistedSegmentationLabel =
-      saved.find(frame => frame.segmentationLabel?.trim())?.segmentationLabel || undefined;
+      metadataDocument?.label ||
+      saved.find(frame => frame.segmentationLabel?.trim())?.segmentationLabel ||
+      undefined;
+    Object.assign(mergedLabelMap, buildLabelMapFromSegmentationDocument(metadataDocument));
     for (const frame of saved) {
       if (frame.labelMap) Object.assign(mergedLabelMap, frame.labelMap);
     }
+
+    // If no label_map metadata was stored with the frames, inject a default segment
+    // No default segment injection: if the user deleted all segments (or never created any),
+    // the panel shows the "No Segment" empty-state placeholder instead of auto-creating a card.
+    // segLoadLog will record the empty label map for diagnostics.
+    segLoadLog('autoCreate:label-map-after-merge', {
+      viewportId,
+      segmentationId,
+      mergedLabelMapKeys: Object.keys(mergedLabelMap),
+      savedCount: saved.length,
+    });
+
     const sortedSegIndices = Object.keys(mergedLabelMap)
       .map(Number)
       .sort((a, b) => a - b);
@@ -1426,14 +1678,38 @@ export const tryAutoCreateSegmentationFromBackend = async (
       };
     }
 
+    segLoadLog('autoCreate:build-segments-config', {
+      viewportId,
+      segmentationId,
+      phase: getPhase(segmentationId),
+      mergedLabelMapKeys: Object.keys(mergedLabelMap),
+      segmentsConfigKeys: Object.keys(segmentsConfig),
+      persistedSegmentationLabel,
+      savedCount: saved.length,
+    });
+
     state?.autoRestoredSegmentationIds.add(segmentationId);
 
     let generatedId: string | undefined;
     try {
+      segLoadLog('autoCreate:createLabelmap-START', {
+        viewportId,
+        segmentationId,
+        phase: getPhase(segmentationId),
+      });
       generatedId = await segmentationService.createLabelmapForDisplaySet(displaySet, {
         segmentationId,
         label: persistedSegmentationLabel,
         segments: segmentsConfig,
+      });
+      if (metadataDocument) {
+        bindSegmentationDocument(generatedId, metadataDocument);
+      }
+      segLoadLog('autoCreate:createLabelmap-DONE', {
+        viewportId,
+        segmentationId,
+        generatedId,
+        ...snapshotSegState(segmentationService, generatedId as string),
       });
       logSegmentationTimeline('viewportVolumesChanged:labelmap-created', {
         viewportId,
@@ -1628,6 +1904,14 @@ export const tryAutoCreateSegmentationFromBackend = async (
       restoredTimePoints,
       ...summarizeLabelmapFrames(labelmapImageIds2),
     });
+    segLoadLog('autoCreate:pixels-restored', {
+      viewportId,
+      generatedId,
+      phase: getPhase(generatedId as string),
+      modifiedIndices,
+      restoredTimePoints,
+      ...snapshotSegState(segmentationService, generatedId as string),
+    });
 
     for (const idx of sortedSegIndices) {
       const entry = mergedLabelMap[idx];
@@ -1684,6 +1968,12 @@ export const tryAutoCreateSegmentationFromBackend = async (
       restoredTimePoints,
     });
     state?.autoCreateDoneDisplaySetUIDs.add(displaySetInstanceUID);
+    segLoadLog('autoCreate:EXIT-success', {
+      viewportId,
+      generatedId,
+      phase: getPhase(generatedId as string),
+      ...snapshotSegState(segmentationService, generatedId as string),
+    });
   } finally {
     state?.autoCreateInProgressDisplaySetUIDs.delete(displaySetInstanceUID);
     if (_autoCreateDisplaySetSegmentationIds.get(displaySetInstanceUID) === segmentationId) {

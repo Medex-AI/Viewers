@@ -11,8 +11,15 @@ export default function getSegmentationPanelCustomization({ commandsManager, ser
     'panelSegmentation.showAddSegment': true,
     'panelSegmentation.onSegmentationAdd': () => {
       const { viewportGridService } = servicesManager.services;
-      const viewportId = viewportGridService.getState().activeViewportId;
-      commandsManager.run('createLabelmapForViewport', { viewportId });
+      const { activeViewportId, viewports } = viewportGridService.getState();
+      const viewportId = activeViewportId || Array.from(viewports?.keys?.() ?? [])[0];
+      if (!viewportId) {
+        return;
+      }
+      commandsManager.run('createLabelmapForViewport', {
+        viewportId,
+        options: { createInitialSegment: true },
+      });
     },
     'panelSegmentation.tableMode': 'collapsed',
     'panelSegmentation.readableText': {

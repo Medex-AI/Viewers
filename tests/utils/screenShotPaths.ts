@@ -108,6 +108,9 @@ const screenShotPaths = {
   tmtvRendering: {
     tmtvDisplayedCorrectly: 'tmtvDisplayedCorrectly.png',
   },
+  medexSegAutoLoad: {
+    viewportWithSegmentation: 'medexSegAutoLoad-viewportWithSegmentation.png',
+  },
   jumpToMeasurementMPR: {
     initialDraw: 'jumpToMeasurementMPR-initialDraw.png',
     scrollAway: 'jumpToMeasurementMPR-scrollAway.png',

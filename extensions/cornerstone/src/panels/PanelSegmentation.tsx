@@ -63,7 +63,12 @@ function SegmentationPersistenceHud({ viewportId }: { viewportId?: string }) {
             };
 
   return (
-    <div className="rounded border px-3 py-2 text-xs shadow-sm" style={toneStyle}>
+    <div
+      data-cy="persistence-hud"
+      data-hud-status={status.kind}
+      className="rounded border px-3 py-2 text-xs shadow-sm"
+      style={toneStyle}
+    >
       <div className="flex items-center justify-between gap-2">
         <span className="font-medium uppercase tracking-wide">{label}</span>
         <span className="opacity-70">
@@ -237,6 +242,17 @@ export default function PanelSegmentation({ children }: withAppTypes) {
 
   // Render content based on mode
   const renderModeContent = () => {
+    if (segmentationsWithRepresentations.length === 0) {
+      return (
+        <div
+          data-cy="segmentation-empty-state"
+          className="flex items-center justify-center py-4 text-base text-white/30 select-none"
+        >
+          No Segmentation
+        </div>
+      );
+    }
+
     if (tableProps.mode === 'collapsed') {
       return (
         <SegmentationTable.Collapsed>

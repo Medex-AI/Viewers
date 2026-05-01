@@ -64,6 +64,26 @@
     },
     {
       "packageName": "@ohif/extension-ovi-labs"
+    },
+    {
+      "packageName": "@medex/segmentation",
+      "default": false
+    },
+    {
+      "packageName": "@medex/inference",
+      "default": false
+    },
+    {
+      "packageName": "@medex/reporting",
+      "default": false
+    },
+    {
+      "packageName": "@medex/ovi-labs",
+      "default": false
+    },
+    {
+      "packageName": "@medex/cvi-labs",
+      "default": false
     }
   ],
   "modes": [

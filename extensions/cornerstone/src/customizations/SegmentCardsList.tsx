@@ -579,6 +579,14 @@ export const SegmentCardsList = ({ children }: { children?: React.ReactNode }) =
 
   return (
     <div className="flex flex-col gap-2 p-2">
+      {segments.length === 0 && (
+        <div
+          data-cy="segment-empty-state"
+          className="flex items-center justify-center py-4 text-base text-white/30 select-none"
+        >
+          No Label
+        </div>
+      )}
       {segments.map(segment => {
         const { segmentIndex, color, visible } = segment as {
           segmentIndex: number;

@@ -1,0 +1,18 @@
+{
+  "name": "@medex/ovi-labs",
+  "version": "0.1.0",
+  "description": "OVI Labs specialty package — uterine peristalsis analysis",
+  "author": "MedEx",
+  "license": "MIT",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test:unit:ci": "jest --ci --runInBand --passWithNoTests"
+  },
+  "peerDependencies": {
+    "@ohif/core": "*"
+  },
+  "dependencies": {
+    "@medex/segmentation": "*"
+  }
+}

@@ -1,8 +1,8 @@
 diff --git a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
-index 13acf80..1c73df2 100644
+index 13acf80..5fafd31 100644
 --- a/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
 +++ b/node_modules/@cornerstonejs/tools/dist/esm/eventListeners/segmentation/imageChangeEventListener.js
-@@ -26,6 +26,15 @@ const disable = function (element) {
+@@ -26,7 +26,31 @@ const disable = function (element) {
      element.removeEventListener(Enums.Events.STACK_NEW_IMAGE, _imageChangeEventListener);
      element.removeEventListener(Enums.Events.IMAGE_RENDERED, _imageChangeEventListener);
  };
@@ -16,9 +16,25 @@ index 13acf80..1c73df2 100644
 +    return Object.values(actors);
 +}
  const perViewportManualTriggers = new Map();
++function triggerSegmentationRenderAfterActorUpdate(viewportId, viewport) {
++    triggerSegmentationRender(viewportId);
++    window.setTimeout(() => {
++        triggerSegmentationRender(viewportId);
++        viewport.render();
++    }, 0);
++}
++function bringLabelmapActorToFront(viewport, actor) {
++    const renderer = viewport.getRenderer?.();
++    if (!renderer || !actor) {
++        return;
++    }
++    renderer.removeViewProp(actor);
++    renderer.addActor(actor);
++}
  function _imageChangeEventListener(evt) {
      const eventData = evt.detail;
-@@ -36,7 +45,7 @@ function _imageChangeEventListener(evt) {
+     const { viewportId, renderingEngineId } = eventData;
+@@ -36,7 +60,7 @@ function _imageChangeEventListener(evt) {
          return;
      }
      const labelmapRepresentations = representations.filter((representation) => representation.type === SegmentationRepresentations.Labelmap);
@@ -27,6 +43,52 @@ index 13acf80..1c73df2 100644
      labelmapRepresentations.forEach((representation) => {
          const { segmentationId } = representation;
          updateLabelmapSegmentationImageReferences(viewportId, segmentationId);
+@@ -100,10 +124,14 @@ function _imageChangeEventListener(evt) {
+                         representationUID: `${segmentationId}-${SegmentationRepresentations.Labelmap}-${derivedImage.imageId}`,
+                         callback: ({ imageActor }) => {
+                             imageActor.getMapper().setInputData(imageData);
++                            imageActor.modified?.();
++                            imageActor.getMapper?.().modified?.();
++                            bringLabelmapActorToFront(viewport, imageActor);
++                            triggerSegmentationRenderAfterActorUpdate(viewportId, viewport);
+                         },
+                     },
+                 ]);
+-                triggerSegmentationRender(viewportId);
++                triggerSegmentationRenderAfterActorUpdate(viewportId, viewport);
+                 return;
+             }
+             else {
+@@ -116,10 +144,14 @@ function _imageChangeEventListener(evt) {
+                 else {
+                     utilities.updateVTKImageDataWithCornerstoneImage(segmentationImageData, derivedImage);
+                 }
++                segmentationImageData.modified?.();
++                segmentationActorInput.actor.modified?.();
++                segmentationActorInput.actor.getMapper?.().modified?.();
++                bringLabelmapActorToFront(viewport, segmentationActorInput.actor);
+             }
+         };
+         derivedImageIds.forEach(updateSegmentationActor);
+-        viewport.render();
++        triggerSegmentationRenderAfterActorUpdate(viewportId, viewport);
+         if (evt.type === Enums.Events.IMAGE_RENDERED) {
+             viewport.element.removeEventListener(Enums.Events.IMAGE_RENDERED, _imageChangeEventListener);
+         }
+diff --git a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/getCurrentLabelmapImageIdForViewport.js b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/getCurrentLabelmapImageIdForViewport.js
+index 57a5322..120a09c 100644
+--- a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/getCurrentLabelmapImageIdForViewport.js
++++ b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/getCurrentLabelmapImageIdForViewport.js
+@@ -1,7 +1,7 @@
+ import { defaultSegmentationStateManager } from './SegmentationStateManager';
+ export function getCurrentLabelmapImageIdForViewport(viewportId, segmentationId) {
+-    const imageIds = getCurrentLabelmapImageIdsForViewport(viewportId, segmentationId);
+-    return imageIds[0];
++    const segmentationStateManager = defaultSegmentationStateManager;
++    return segmentationStateManager.getCurrentLabelmapImageIdForViewport(viewportId, segmentationId);
+ }
+ export function getCurrentLabelmapImageIdsForViewport(viewportId, segmentationId) {
+     const segmentationStateManager = defaultSegmentationStateManager;
 diff --git a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js b/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js
 index 90f0f01..e8f560d 100644
 --- a/node_modules/@cornerstonejs/tools/dist/esm/stateManagement/segmentation/helpers/getSegmentationActor.js

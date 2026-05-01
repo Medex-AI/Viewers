@@ -112,6 +112,7 @@ export interface SegmentationFrameRecord {
   data_encoding?: 'base64';
   mask_data: Uint8Array;
   label_map?: Record<number, { labelId: string; labelName: string; labelColor: string }> | null;
+  segmentation_label?: string;
 }
 
 class AnnotationApiClient {
@@ -201,6 +202,15 @@ class AnnotationApiClient {
       headers,
       credentials: 'include',
     });
+
+    if (response.status === 400) {
+      console.debug('[segmentation-api] bulk segmentation frame delete not supported by backend yet', {
+        studyUID,
+        seriesUID,
+        modelType,
+      });
+      return;
+    }
 
     if (!response.ok) {
       throw new Error(`Failed to load segmentation frames: ${response.statusText}`);
@@ -294,6 +304,48 @@ class AnnotationApiClient {
       seriesUID,
       modelType,
       frameKey,
+    });
+  }
+
+  async deleteSegmentationFrames({
+    studyUID,
+    seriesUID,
+    modelType,
+  }: {
+    studyUID: string;
+    seriesUID: string;
+    modelType: string;
+  }): Promise<void> {
+    const headers = await getAuthHeaders();
+    if (!headers) {
+      return;
+    }
+
+    const search = new URLSearchParams({
+      study: studyUID,
+      series: seriesUID,
+      model: modelType,
+    });
+
+    const response = await this.request(`/segmentation-frames?${search.toString()}`, {
+      method: 'DELETE',
+      headers,
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(
+        `Failed to delete segmentation frames: ${response.status} ${response.statusText}${
+          body ? ` - ${body}` : ''
+        }`
+      );
+    }
+
+    console.debug('[segmentation-api] deleted segmentation frames', {
+      studyUID,
+      seriesUID,
+      modelType,
     });
   }
 }

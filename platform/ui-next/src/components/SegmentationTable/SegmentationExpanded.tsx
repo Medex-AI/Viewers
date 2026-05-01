@@ -40,6 +40,7 @@ const SegmentationExpandedDropdownMenu = ({ children }: { children: React.ReactN
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Segmentation Options"
               className="ml-1"
               onClick={e => e.stopPropagation()}
             >

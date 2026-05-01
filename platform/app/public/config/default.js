@@ -133,7 +133,7 @@ window.config = {
       ],
     },
   ],
-  defaultDataSourceName: 'orthanc-ovilab',
+  defaultDataSourceName: 'orthanc-medex',
   // defaultDataSourceName: 'ohif3',
   /* Dynamic config allows user to pass "configUrl" query string this allows to load config without recompiling application. The regex will ensure valid configuration source */
   // dangerouslyUseDynamicConfig: {
@@ -294,10 +294,10 @@ window.config = {
     },
     {
       namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
-      sourceName: 'orthanc-ovilab',
+      sourceName: 'orthanc-medex',
       configuration: {
         friendlyName: 'MedEx Orthanc DICOMWeb Server',
-        name: 'ORTHANC-OVILAB',
+        name: 'ORTHANC-MEDEX',
         wadoUriRoot: '/dicom-web',
         qidoRoot: '/dicom-web',
         wadoRoot: '/dicom-web',

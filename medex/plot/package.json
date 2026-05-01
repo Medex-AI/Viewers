@@ -1,0 +1,15 @@
+{
+  "name": "@medex/plot",
+  "version": "0.1.0",
+  "description": "MedEx shared visualization components — kymograph, metrics charts",
+  "author": "MedEx",
+  "license": "MIT",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test:unit:ci": "jest --ci --runInBand --passWithNoTests"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1"
+  }
+}
