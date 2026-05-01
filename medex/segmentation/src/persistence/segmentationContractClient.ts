@@ -37,6 +37,27 @@ export const getBoundSegmentationDocument = (
   localSegmentationId: string
 ): SegmentationDocument | undefined => localToRemote.get(localSegmentationId);
 
+export const deleteBoundSegmentationDocument = async (
+  localSegmentationId: string
+): Promise<void> => {
+  const document = localToRemote.get(localSegmentationId);
+  if (!document) {
+    return;
+  }
+
+  const response = await fetch(`/api/segmentations/${document.id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+    credentials: 'include',
+  });
+
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Failed to delete segmentation metadata: ${response.status}`);
+  }
+
+  localToRemote.delete(localSegmentationId);
+};
+
 export const createBoundSegmentationDocument = async ({
   localSegmentationId,
   studyInstanceUID,

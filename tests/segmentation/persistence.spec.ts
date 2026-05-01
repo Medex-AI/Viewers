@@ -732,6 +732,32 @@ test.describe('Delete labelmap object', () => {
       'HUD must not remain Dirty/Unsaved after adding a label from a deleted labelmap state'
     ).not.toHaveAttribute('data-hud-status', 'dirty', { timeout: AUTOSAVE_SETTLE_MS + 5_000 });
   });
+
+  test('Deleted top-level labelmap is not auto-created again after refresh', async ({ page }) => {
+    await page.getByRole('button', { name: /segmentation options/i }).click();
+    await page.getByRole('menuitem', { name: /^Delete$/i }).click();
+    await page.locator('[data-cy="confirm-delete-segmentation"]').click();
+
+    await expect(page.locator('[data-cy="data-row"]')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator('[data-cy="persistence-hud"]')).toHaveAttribute(
+      'data-hud-status',
+      'synced',
+      { timeout: AUTOSAVE_SETTLE_MS + 5_000 }
+    );
+
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForFunction(
+      () => document.querySelectorAll('canvas.cornerstone-canvas').length >= 1,
+      undefined,
+      { timeout: AUTO_LOAD_TIMEOUT_MS }
+    );
+
+    await expect(
+      page.locator('[data-cy="data-row"]'),
+      'Explicitly deleted labelmap should not be recreated with a default label after refresh'
+    ).toHaveCount(0, { timeout: AUTOSAVE_SETTLE_MS + 5_000 });
+  });
 });
 
 // ─── NIfTI export buttons ─────────────────────────────────────────────────────

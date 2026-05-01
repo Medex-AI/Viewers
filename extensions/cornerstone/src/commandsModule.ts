@@ -56,6 +56,7 @@ import {
   patchBoundLabel,
   patchRemoveBoundLabel,
 } from '../../../medex/segmentation/src/persistence/segmentationContractClient';
+import { clearSegmentationDeletedForDisplaySet } from '../../../medex/segmentation/src/persistence/deletedSegmentationMarkers';
 
 const { DefaultHistoryMemo } = csUtils.HistoryMemo;
 const toggleSyncFunctions = {
@@ -1377,6 +1378,11 @@ function commandsModule({
       const segmentationId = options.segmentationId || `${csUtils.uuidv4()}`;
 
       const displaySet = displaySetService.getDisplaySetByUID(displaySetInstanceUID);
+      clearSegmentationDeletedForDisplaySet({
+        studyInstanceUID: displaySet?.StudyInstanceUID,
+        seriesInstanceUID: displaySet?.SeriesInstanceUID,
+        displaySetInstanceUID,
+      });
 
       const generatedSegmentationId = await segmentationService.createLabelmapForDisplaySet(
         displaySet,

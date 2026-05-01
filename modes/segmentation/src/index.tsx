@@ -34,6 +34,8 @@ import {
   destroyAll as destroyAdapterState,
 } from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
 import { resolveSliceIdentity } from '../../../medex/segmentation/src/utils/sliceIdentityResolver';
+import { markSegmentationDeletedForDisplaySet } from '../../../medex/segmentation/src/persistence/deletedSegmentationMarkers';
+import { deleteBoundSegmentationDocument } from '../../../medex/segmentation/src/persistence/segmentationContractClient';
 
 const DEFAULT_BRUSH_SIZE_MM = 3;
 const DEFAULT_BRUSH_TOOL_NAMES = [
@@ -736,17 +738,22 @@ function modeFactory({ modeConfiguration }) {
             return; // no study/series recorded — nothing to clean up
           }
           const { studyInstanceUID, seriesInstanceUID } = ids;
+          markSegmentationDeletedForDisplaySet(ids);
           logSegmentationTimeline('segmentation-removed:delete-all-frames', {
             segmentationId,
             studyInstanceUID,
             seriesInstanceUID,
+            displaySetInstanceUID: ids.displaySetInstanceUID,
           });
           updatePersistenceStatus(
             servicesManager,
             'dirty',
             'Unsaved segmentation changes. Saving will start automatically.'
           );
-          void deleteAllSegFrames(studyInstanceUID, seriesInstanceUID)
+          void Promise.allSettled([
+            deleteAllSegFrames(studyInstanceUID, seriesInstanceUID),
+            deleteBoundSegmentationDocument(segmentationId),
+          ])
             .then(() => {
               updatePersistenceStatus(servicesManager, 'synced', 'Segmentation deleted.');
               _segStudySeriesMap.delete(segmentationId);

@@ -6,12 +6,16 @@ import { setSegmentationPersistenceStatus } from '../../../extensions/cornerston
 import { hexToRgba255, rgbaToHex } from '../../../extensions/ovi-labs/src/utils/colorUtils';
 import {
   getPhase,
+  destroy as destroyAdapterSegmentation,
   setPhase,
 } from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
 import {
   bindSegmentationDocument,
   listSegmentationDocuments,
 } from '../../../medex/segmentation/src/persistence/segmentationContractClient';
+import {
+  wasSegmentationDeletedForDisplaySet,
+} from '../../../medex/segmentation/src/persistence/deletedSegmentationMarkers';
 
 // ─── Timestamped debug logger ─────────────────────────────────────────────────
 
@@ -618,7 +622,7 @@ const writeVolumeSliceScalarData = (
 export const getSegStudySeries = (
   segmentationId: string,
   servicesManager: any
-): { studyInstanceUID: string; seriesInstanceUID: string } | null => {
+): { studyInstanceUID: string; seriesInstanceUID: string; displaySetInstanceUID?: string } | null => {
   const { segmentationService } = servicesManager.services;
   const segState = segmentationService.getSegmentation(segmentationId);
   if (!segState) return null;
@@ -632,6 +636,7 @@ export const getSegStudySeries = (
   return {
     studyInstanceUID: instance.StudyInstanceUID,
     seriesInstanceUID: instance.SeriesInstanceUID,
+    displaySetInstanceUID: segState.displaySetInstanceUID,
   };
 };
 
@@ -1512,6 +1517,29 @@ export const tryAutoCreateSegmentationFromBackend = async (
   try {
     const studyInstanceUID = displaySet.StudyInstanceUID;
     const seriesInstanceUID = displaySet.SeriesInstanceUID;
+
+    if (
+      wasSegmentationDeletedForDisplaySet({
+        studyInstanceUID,
+        seriesInstanceUID,
+        displaySetInstanceUID,
+      })
+    ) {
+      logSegmentationTimeline('viewportVolumesChanged:skip-auto-create-after-user-delete', {
+        viewportId,
+        displaySetInstanceUID,
+        studyInstanceUID,
+        seriesInstanceUID,
+      });
+      updatePersistenceStatus(
+        servicesManager,
+        'synced',
+        'Segmentation deleted. Create a new labelmap to start again.'
+      );
+      state?.autoCreateDoneDisplaySetUIDs.add(displaySetInstanceUID);
+      destroyAdapterSegmentation(segmentationId);
+      return;
+    }
 
     let saved: Awaited<ReturnType<typeof loadSegFrames>> = [];
     let metadataDocument: Awaited<ReturnType<typeof listSegmentationDocuments>>[number] | undefined;
