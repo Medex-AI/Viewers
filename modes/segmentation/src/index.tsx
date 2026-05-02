@@ -473,6 +473,22 @@ function modeFactory({ modeConfiguration }) {
               mode: mode === 'erase' ? 'erase' : 'draw',
             });
           },
+          saveActiveSegmentation: async () => {
+            const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+            const activeSegmentation = activeViewportId
+              ? segmentationService?.getActiveSegmentation?.(activeViewportId)
+              : null;
+            const segmentationId = activeSegmentation?.segmentationId || activeSegmentation?.id;
+            if (!segmentationId) {
+              return null;
+            }
+
+            await saveAllFrames(segmentationId, servicesManager, 'all-timepoints', {
+              deleteEmptyFrames: false,
+              writeEmptyPlaceholder: false,
+            });
+            return segmentationId;
+          },
         };
       }
 

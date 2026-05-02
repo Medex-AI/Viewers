@@ -11,7 +11,12 @@ import {
   writeMaskToActiveSegmentation,
   writeContourToActiveSegmentation,
   OVI_SEGMENTATION_LABELS,
+  OVI_SEGMENTATION_NAME,
 } from '../../../../extensions/ovi-labs/src/utils/oviSegmentation';
+import {
+  createBoundSegmentationDocument,
+  getBoundSegmentationDocument,
+} from '../../../../medex/segmentation/src/persistence/segmentationContractClient';
 import {
   deleteSegmentationFrame,
   loadSegmentationFrames,
@@ -731,6 +736,27 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       ])
     );
 
+    if (!getBoundSegmentationDocument(segmentationId)) {
+      await createBoundSegmentationDocument({
+        localSegmentationId: segmentationId,
+        studyInstanceUID,
+        seriesInstanceUID,
+        displaySetInstanceUID: activeContext?.viewportInfo?.getDisplaySetOptions?.()?.[0]?.displaySetInstanceUID,
+        label: OVI_SEGMENTATION_NAME,
+        labels: Object.fromEntries(
+          OVI_SEGMENTATION_LABELS.map(label => [
+            label.segmentIndex,
+            {
+              name: label.name,
+              color: label.color,
+            },
+          ])
+        ),
+      }).catch(error => {
+        console.warn('Failed to create bound OVI segmentation document:', error);
+      });
+    }
+
     for (const frame of frames) {
       if (!frame.referencedImageId) {
         continue;
@@ -741,7 +767,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
         await deleteSegmentationFrame({
           studyInstanceUID,
           seriesInstanceUID,
-          model: 'manual',
+          model: 'segmentation',
           frameKey: frame.referencedImageId,
         });
         continue;
@@ -750,7 +776,8 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       await saveSegmentationFrame({
         studyInstanceUID,
         seriesInstanceUID,
-        model: 'manual',
+        model: 'segmentation',
+        segmentationLabel: OVI_SEGMENTATION_NAME,
         frameKey: frame.referencedImageId,
         frameNumber: frame.frameIndex + 1,
         width: frame.width,
@@ -771,9 +798,11 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
     const seriesInstanceUID = instance?.SeriesInstanceUID;
     const displaySetInstanceUID =
       activeContext?.viewportInfo?.getDisplaySetOptions?.()?.[0]?.displaySetInstanceUID;
-    const expectedSegmentationId = displaySetInstanceUID
-      ? getOviSegmentationIdForDisplaySet(displaySetInstanceUID)
-      : null;
+    const fallbackContext = await ensureOviSegmentationForViewport(servicesManager, activeViewportId);
+    const expectedSegmentationId =
+      (displaySetInstanceUID ? getOviSegmentationIdForDisplaySet(displaySetInstanceUID) : null) ||
+      fallbackContext?.segmentationId ||
+      null;
 
     if (
       !activeViewportId ||
@@ -790,7 +819,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       return;
     }
 
-    const frames = await loadSegmentationFrames(seriesInstanceUID, studyInstanceUID, 'manual');
+    const frames = await loadSegmentationFrames(seriesInstanceUID, studyInstanceUID, 'segmentation');
     restoredSegmentationKeys.add(restoreKey);
     if (!frames.length) {
       return;
@@ -810,6 +839,20 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
         referencedImageId: frame.frameKey,
       });
     }
+  };
+
+  const restoreActiveManualSegmentation = async () => {
+    const activeContext = getActiveViewportContext(servicesManager);
+    const activeViewportId = activeContext?.activeViewportId;
+    const activeSegmentation = activeViewportId
+      ? segmentationService.getActiveSegmentation(activeViewportId)
+      : null;
+
+    if (!activeSegmentation?.segmentationId) {
+      return;
+    }
+
+    await restoreManualSegmentation(activeSegmentation.segmentationId);
   };
 
   const onToolActivated = evt => {
@@ -1139,6 +1182,7 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
   // so the brush tool is ready before the user interacts with it.
   const onViewportNewImageSet = () => {
     void ensureOviSegmentationForViewport(servicesManager);
+    void restoreActiveManualSegmentation();
   };
 
   eventTarget.addEventListener(Enums.Events.TOOL_ACTIVATED, onToolActivated);
@@ -1193,6 +1237,13 @@ export default function setupManualContourBehavior(servicesManager: AppTypes.Ser
       void restoreManualSegmentation(segmentationId);
     }
   );
+
+  window.setTimeout(() => {
+    void restoreActiveManualSegmentation();
+  }, 250);
+  window.setTimeout(() => {
+    void restoreActiveManualSegmentation();
+  }, 1000);
 
   const onKeyDown = (evt: KeyboardEvent) => {
     if (!isManualContourActive && !isManualContourToolActive(servicesManager)) {

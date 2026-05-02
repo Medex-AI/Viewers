@@ -1,5 +1,7 @@
 import { cache, imageLoader, utilities as csUtils } from '@cornerstonejs/core';
 import { annotation, Enums as toolEnums, segmentation } from '@cornerstonejs/tools';
+import { DicomMetadataStore } from '@ohif/core';
+import { getStableFrameKey } from '../../../../modes/segmentation/src/segmentationPersistenceOps';
 import { maskToContours } from './maskToContour';
 import { rasterizePolygonToMask } from './rasterizeContour';
 
@@ -15,6 +17,7 @@ export const OVI_SEGMENTATION_LABELS = [
 export type OviSegmentationLabel = (typeof OVI_SEGMENTATION_LABELS)[number];
 
 export const OVI_SEGMENTATION_ID_PREFIX = 'ovi-labs';
+export const OVI_SEGMENTATION_NAME = 'Ovi Lab';
 let hasShownTemporalVolumeSegmentationWarning = false;
 
 const pushOviBrushDebug = (message: string, details?: Record<string, unknown>) => {
@@ -46,6 +49,30 @@ const labelBySegmentIndex = new Map<number, OviSegmentationLabel>(
   OVI_SEGMENTATION_LABELS.map(label => [label.segmentIndex, label])
 );
 
+const getSeriesInstanceUIDFromImageId = (imageId?: string | null) => {
+  if (!imageId) {
+    return null;
+  }
+
+  const metadataSeriesInstanceUID = DicomMetadataStore.getInstanceByImageId(imageId)?.SeriesInstanceUID;
+  if (metadataSeriesInstanceUID) {
+    return metadataSeriesInstanceUID;
+  }
+
+  const match = imageId.match(/\/series\/([^/]+)\/instances\//i);
+  return match?.[1] || null;
+};
+
+export const isOviCompatibleSegmentation = (segmentationState?: any) => {
+  if (!segmentationState?.segments) {
+    return false;
+  }
+
+  return OVI_SEGMENTATION_LABELS.every(
+    label => segmentationState.segments?.[label.segmentIndex]?.label === label.name
+  );
+};
+
 export const getOviSegmentationIdForDisplaySet = (displaySetInstanceUID: string) =>
   `${OVI_SEGMENTATION_ID_PREFIX}:${displaySetInstanceUID}`;
 
@@ -69,7 +96,18 @@ const getDisplaySetContext = (servicesManager, viewportId?: string) => {
 
   const viewportInfo = cornerstoneViewportService.getViewportInfo?.(targetViewportId);
   const viewport = cornerstoneViewportService.getCornerstoneViewport?.(targetViewportId);
-  const displaySetInstanceUID = viewportInfo?.getDisplaySetOptions?.()?.[0]?.displaySetInstanceUID;
+  const preferredDisplaySetInstanceUID = viewportInfo?.getDisplaySetOptions?.()?.[0]?.displaySetInstanceUID;
+  const currentImageId = viewport?.getCurrentImageId?.();
+  const seriesInstanceUID = getSeriesInstanceUIDFromImageId(currentImageId);
+  const seriesDisplaySet = seriesInstanceUID
+    ? displaySetService.getDisplaySetsForSeries?.(seriesInstanceUID)?.[0] ||
+      displaySetService.getActiveDisplaySets?.()?.find(ds => ds.SeriesInstanceUID === seriesInstanceUID) ||
+      Array.from(displaySetService.getDisplaySetCache?.()?.values?.() || []).find(
+        ds => ds.SeriesInstanceUID === seriesInstanceUID
+      )
+    : null;
+  const displaySetInstanceUID =
+    preferredDisplaySetInstanceUID || seriesDisplaySet?.displaySetInstanceUID;
   if (!displaySetInstanceUID) {
     return null;
   }
@@ -168,7 +206,7 @@ export const ensureOviSegmentationForViewport = async (servicesManager, viewport
   if (!segmentationState) {
     await segmentationService.createLabelmapForDisplaySet(displaySet, {
       segmentationId,
-      label: 'OVI Labs Segmentation',
+      label: OVI_SEGMENTATION_NAME,
       segments: Object.fromEntries(
         OVI_SEGMENTATION_LABELS.map(label => [
           label.segmentIndex,
@@ -228,18 +266,152 @@ export const ensureOviSegmentationForViewport = async (servicesManager, viewport
   };
 };
 
+export const activateOviCompatibleSegmentation = async ({
+  servicesManager,
+  viewportId,
+  segmentationId,
+}: {
+  servicesManager: any;
+  viewportId?: string;
+  segmentationId: string;
+}) => {
+  const { segmentationService } = servicesManager?.services || {};
+  const context = getDisplaySetContext(servicesManager, viewportId);
+  const segmentationState = segmentationService?.getSegmentation?.(segmentationId);
+
+  if (!context?.viewportId || !segmentationService || !isOviCompatibleSegmentation(segmentationState)) {
+    return null;
+  }
+
+  const representations = segmentationService.getSegmentationRepresentations(context.viewportId, {
+    segmentationId,
+    type: toolEnums.SegmentationRepresentations.Labelmap,
+  });
+
+  if (!representations.length) {
+    await segmentationService.addSegmentationRepresentation(context.viewportId, {
+      segmentationId,
+      type: toolEnums.SegmentationRepresentations.Labelmap,
+    });
+  }
+
+  segmentationService.setActiveSegmentation(context.viewportId, segmentationId);
+  ensureConfiguredSegments(servicesManager, context.viewportId, segmentationId);
+
+  return {
+    ...context,
+    segmentationId,
+    segmentation: segmentationService.getSegmentation(segmentationId),
+  };
+};
+
+export const createOviSegmentationImportCopy = async ({
+  servicesManager,
+  viewportId,
+  sourceSegmentationId,
+  mapping,
+}: {
+  servicesManager: any;
+  viewportId?: string;
+  sourceSegmentationId: string;
+  mapping: Record<number, number>;
+}) => {
+  const { segmentationService } = servicesManager?.services || {};
+  const context = getDisplaySetContext(servicesManager, viewportId);
+  const sourceSegmentation = segmentationService?.getSegmentation?.(sourceSegmentationId);
+
+  if (!context?.viewportId || !context.displaySet || !segmentationService || !sourceSegmentation) {
+    return null;
+  }
+
+  const segmentationId = `${OVI_SEGMENTATION_ID_PREFIX}:${context.displaySetInstanceUID}:${Date.now()}`;
+  await segmentationService.createLabelmapForDisplaySet(context.displaySet, {
+    segmentationId,
+    label: OVI_SEGMENTATION_NAME,
+    segments: Object.fromEntries(
+      OVI_SEGMENTATION_LABELS.map(label => [
+        label.segmentIndex,
+        {
+          label: label.name,
+          active: label.segmentIndex === 1,
+        },
+      ])
+    ),
+  });
+
+  await segmentationService.addSegmentationRepresentation(context.viewportId, {
+    segmentationId,
+    type: toolEnums.SegmentationRepresentations.Labelmap,
+  });
+
+  const targetSegmentation = segmentationService.getSegmentation(segmentationId);
+  const sourceFrames = await getAllFrameLabelmaps(sourceSegmentation);
+  const targetFrames = await getAllFrameLabelmaps(targetSegmentation);
+  const modifiedFrameIndices: number[] = [];
+
+  targetFrames.forEach((targetFrame, frameIndex) => {
+    const sourceFrame =
+      sourceFrames.find(frame => frame.referencedImageId === targetFrame.referencedImageId) ||
+      sourceFrames[frameIndex];
+
+    if (!sourceFrame || sourceFrame.scalarData.length !== targetFrame.scalarData.length) {
+      return;
+    }
+
+    let didModify = false;
+    targetFrame.scalarData.fill(0);
+    Object.entries(mapping).forEach(([targetSegmentIndexString, sourceSegmentIndex]) => {
+      const targetSegmentIndex = Number(targetSegmentIndexString);
+      if (!targetSegmentIndex || !sourceSegmentIndex) {
+        return;
+      }
+
+      for (let i = 0; i < sourceFrame.scalarData.length; i += 1) {
+        if (sourceFrame.scalarData[i] === sourceSegmentIndex) {
+          targetFrame.scalarData[i] = targetSegmentIndex;
+          didModify = true;
+        }
+      }
+    });
+
+    if (didModify) {
+      modifiedFrameIndices.push(targetFrame.frameIndex);
+    }
+  });
+
+  segmentationService.setActiveSegmentation(context.viewportId, segmentationId);
+  ensureConfiguredSegments(servicesManager, context.viewportId, segmentationId);
+
+  segmentation.triggerSegmentationEvents.triggerSegmentationDataModified(
+    segmentationId,
+    modifiedFrameIndices.length ? modifiedFrameIndices : targetFrames.map(frame => frame.frameIndex)
+  );
+
+  return {
+    ...context,
+    segmentationId,
+    segmentation: segmentationService.getSegmentation(segmentationId),
+    modifiedFrameIndices,
+  };
+};
+
 const getFrameLabelmap = async (segmentationState, referencedImageId?: string) => {
   const labelmapData = segmentationState?.representationData?.[
     toolEnums.SegmentationRepresentations.Labelmap
   ] as { imageIds?: string[]; referencedImageIds?: string[] } | undefined;
 
-  const referencedImageIds = labelmapData?.referencedImageIds || [];
-  const imageIds = labelmapData?.imageIds || [];
+  const referencedImageIds = (labelmapData?.referencedImageIds || []).filter(Boolean);
+  const imageIds = (labelmapData?.imageIds || []).filter(Boolean);
   if (!imageIds.length) {
     return null;
   }
 
-  const frameIndex = referencedImageId ? referencedImageIds.indexOf(referencedImageId) : 0;
+  const targetFrameKey = referencedImageId
+    ? getStableFrameKey(referencedImageId) || referencedImageId
+    : null;
+  const frameIndex = targetFrameKey
+    ? referencedImageIds.findIndex(imageId => (getStableFrameKey(imageId) || imageId) === targetFrameKey)
+    : 0;
   if (frameIndex < 0 || !imageIds[frameIndex]) {
     return null;
   }
@@ -309,14 +481,24 @@ const getAllFrameLabelmaps = async segmentationState => {
     toolEnums.SegmentationRepresentations.Labelmap
   ] as { imageIds?: string[]; referencedImageIds?: string[] } | undefined;
 
-  const imageIds = labelmapData?.imageIds || [];
-  const referencedImageIds = labelmapData?.referencedImageIds || [];
+  const entries = (labelmapData?.imageIds || []).reduce(
+    (acc, labelmapImageId, frameIndex) => {
+      const referencedImageId = labelmapData?.referencedImageIds?.[frameIndex];
+      if (labelmapImageId && referencedImageId) {
+        acc.push({ labelmapImageId, referencedImageId, frameIndex });
+      }
+      return acc;
+    },
+    [] as Array<{ labelmapImageId: string; referencedImageId: string; frameIndex: number }>
+  );
+
+  const imageIds = entries.map(entry => entry.labelmapImageId);
   if (!imageIds.length) {
     return [];
   }
 
   const frames = await Promise.all(
-    imageIds.map(async (labelmapImageId, frameIndex) => {
+    entries.map(async ({ labelmapImageId, referencedImageId, frameIndex }) => {
       const labelmapImage =
         cache.getImage(labelmapImageId) || (await imageLoader.loadAndCacheImage(labelmapImageId));
       const scalarData = labelmapImage?.voxelManager?.getScalarData?.();
@@ -330,7 +512,7 @@ const getAllFrameLabelmaps = async segmentationState => {
       return {
         frameIndex,
         labelmapImageId,
-        referencedImageId: referencedImageIds[frameIndex],
+        referencedImageId,
         width,
         height,
         scalarData: scalarData as Uint8Array,
@@ -501,17 +683,26 @@ export const writeContourToActiveSegmentation = async ({
   referencedImageId,
   worldPolyline,
   segmentIndex,
+  mode = 'draw',
 }: {
   servicesManager: any;
   viewportId?: string;
   referencedImageId?: string;
   worldPolyline: number[][];
-  segmentIndex: number;
+  segmentIndex?: number;
+  mode?: 'draw' | 'erase';
 }) => {
+  const { segmentationService } = servicesManager?.services || {};
   const context = await ensureOviSegmentationForViewport(servicesManager, viewportId);
   if (!context?.viewport || !context.segmentation || !referencedImageId || !worldPolyline?.length) {
     return null;
   }
+
+  const resolvedSegmentIndex =
+    segmentIndex ||
+    segmentationService?.getActiveSegment?.(context.viewportId)?.segmentIndex ||
+    segmentationService?.getActiveSegment?.(context.segmentationId)?.segmentIndex ||
+    1;
 
   const frame = await getFrameLabelmap(context.segmentation, referencedImageId);
   if (!frame) {
@@ -525,11 +716,27 @@ export const writeContourToActiveSegmentation = async ({
     return [indexPoint[0], indexPoint[1]] as [number, number];
   });
 
-  rasterizePolygonToMask(frame.scalarData, polygon, segmentIndex, frame.width, frame.height);
+  if (mode === 'erase') {
+    const eraseMask = new Uint8Array(frame.width * frame.height);
+    rasterizePolygonToMask(eraseMask, polygon, 1, frame.width, frame.height);
+    for (let i = 0; i < eraseMask.length; i += 1) {
+      if (eraseMask[i] && frame.scalarData[i] === resolvedSegmentIndex) {
+        frame.scalarData[i] = 0;
+      }
+    }
+  } else {
+    rasterizePolygonToMask(
+      frame.scalarData,
+      polygon,
+      resolvedSegmentIndex,
+      frame.width,
+      frame.height
+    );
+  }
   segmentation.triggerSegmentationEvents.triggerSegmentationDataModified(
     context.segmentationId,
     [frame.frameIndex],
-    segmentIndex
+    resolvedSegmentIndex
   );
 
   return {
@@ -597,7 +804,7 @@ export const syncDerivedContoursFromSegmentation = async ({
         annotationUID,
         highlighted: false,
         isLocked: false,
-        isVisible: true,
+        isVisible: false,
         invalidated: true,
         metadata: {
           toolName: MANUAL_CONTOUR_TOOL_NAME,
@@ -616,9 +823,9 @@ export const syncDerivedContoursFromSegmentation = async ({
           labelId: labelInfo.labelId,
           labelName: labelInfo.labelName,
           labelColor: labelInfo.labelColor,
-          fillColor: labelInfo.labelColor,
-          fillOpacity: 0.2,
-          renderFill: true,
+          fillColor: 'transparent',
+          fillOpacity: 0,
+          renderFill: false,
           modelType,
           derivedFromSegmentation: true,
           createdAt: now,
@@ -627,12 +834,23 @@ export const syncDerivedContoursFromSegmentation = async ({
       });
 
       annotation.config.style.setAnnotationStyles(annotationUID, {
-        color: labelInfo.labelColor,
-        colorHighlighted: labelInfo.labelColor,
-        colorSelected: labelInfo.labelColor,
-        fillColor: labelInfo.labelColor,
-        fillOpacity: 0.2,
+        color: 'transparent',
+        colorHighlighted: 'transparent',
+        colorSelected: 'transparent',
+        fillColor: 'transparent',
+        fillOpacity: 0,
+        renderFill: false,
       });
+
+      const createdAnnotation = annotation.state.getAnnotation(annotationUID);
+      if (createdAnnotation) {
+        createdAnnotation.isVisible = false;
+        if (createdAnnotation.data) {
+          createdAnnotation.data.fillColor = 'transparent';
+          createdAnnotation.data.fillOpacity = 0;
+          createdAnnotation.data.renderFill = false;
+        }
+      }
     });
   });
 

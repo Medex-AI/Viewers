@@ -69,6 +69,20 @@ let currentState: SegmentationState = {
 };
 const DEFAULT_LABEL_OPACITY = 0.2;
 
+const applyHiddenDerivedContourStyle = (annotationUID: string): void => {
+  annotation.config.style.setAnnotationStyles(annotationUID, {
+    color: 'transparent',
+    colorHighlighted: 'transparent',
+    colorSelected: 'transparent',
+    fillColor: 'transparent',
+    fillOpacity: 0,
+    renderFill: false,
+  });
+};
+
+const isDerivedContourAnnotation = (annotationObj: any): boolean =>
+  annotationObj?.data?.derivedFromSegmentation === true;
+
 type Subscriber = (state: SegmentationState) => void;
 const subscribers: Set<Subscriber> = new Set();
 type SegmentationMutationContext = {
@@ -132,6 +146,16 @@ const setContourVisibility = (annotationUID: string, visible: boolean): void => 
   try {
     const annotationObj = annotation.state.getAnnotation(annotationUID);
     if (annotationObj) {
+      if (isDerivedContourAnnotation(annotationObj)) {
+        annotationObj.isVisible = false;
+        if (annotationObj.data) {
+          annotationObj.data.fillOpacity = 0;
+          annotationObj.data.renderFill = false;
+        }
+        applyHiddenDerivedContourStyle(annotationUID);
+        return;
+      }
+
       // Set visibility on the annotation object
       annotationObj.isVisible = visible;
 
@@ -161,6 +185,16 @@ const showContour = (annotationUID: string, color: string, opacity: number): voi
   try {
     const annotationObj = annotation.state.getAnnotation(annotationUID);
     if (annotationObj) {
+      if (isDerivedContourAnnotation(annotationObj)) {
+        annotationObj.isVisible = false;
+        if (annotationObj.data) {
+          annotationObj.data.fillOpacity = 0;
+          annotationObj.data.renderFill = false;
+        }
+        applyHiddenDerivedContourStyle(annotationUID);
+        return;
+      }
+
       // Ensure annotation is visible
       annotationObj.isVisible = true;
       if (annotationObj.data) {
@@ -181,6 +215,16 @@ const showContour = (annotationUID: string, color: string, opacity: number): voi
 const setContourOpacity = (annotationUID: string, color: string, opacity: number): void => {
   try {
     const annotationObj = annotation.state.getAnnotation(annotationUID);
+    if (isDerivedContourAnnotation(annotationObj)) {
+      if (annotationObj?.data) {
+        annotationObj.data.fillColor = 'transparent';
+        annotationObj.data.fillOpacity = 0;
+        annotationObj.data.renderFill = false;
+      }
+      applyHiddenDerivedContourStyle(annotationUID);
+      return;
+    }
+
     if (annotationObj?.data) {
       annotationObj.data.fillColor = color;
       annotationObj.data.fillOpacity = opacity;

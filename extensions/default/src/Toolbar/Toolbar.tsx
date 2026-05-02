@@ -12,7 +12,7 @@ export function Toolbar({ servicesManager, buttonSection = 'primary' }) {
   }
 
   return (
-    <>
+    <div className="flex items-center gap-[4px]">
       {toolbarButtons?.map(toolDef => {
         if (!toolDef) {
           return null;
@@ -29,8 +29,12 @@ export function Toolbar({ servicesManager, buttonSection = 'primary' }) {
           />
         );
 
-        return <div key={id}>{tool}</div>;
+        return (
+          <div key={id} className="flex h-[40px] items-center">
+            {tool}
+          </div>
+        );
       })}
-    </>
+    </div>
   );
 }

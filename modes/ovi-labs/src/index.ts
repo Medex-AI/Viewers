@@ -11,7 +11,10 @@ import setupManualContourBehavior, {
 import setupMaskContourBehavior from './utils/setupMaskContourBehavior';
 import setupManipulationToolsCursor from './utils/setupManipulationToolsCursor';
 import viewportClickCommandsCustomization from './customizations/viewportClickCommandsCustomization';
-import { ensureOviSegmentationForViewport } from '../../../extensions/ovi-labs/src/utils/oviSegmentation';
+import {
+  ensureOviSegmentationForViewport,
+  writeContourToActiveSegmentation,
+} from '../../../extensions/ovi-labs/src/utils/oviSegmentation';
 import './styles.css';
 import { annotation } from '@cornerstonejs/tools';
 import { getEnabledElement } from '@cornerstonejs/core';
@@ -249,6 +252,7 @@ function modeFactory({ modeConfiguration }) {
   let teardownManualContourBehavior;
   let teardownMaskContourBehavior;
   let teardownManipulationToolsCursor;
+  let displaySetSubscriptions = [];
   let commandsManagerRef;
 
   return {
@@ -256,7 +260,14 @@ function modeFactory({ modeConfiguration }) {
     routeName: 'ovi-labs',
     displayName: 'Ovi Labs',
     onModeEnter: ({ servicesManager, extensionManager, commandsManager }: withAppTypes) => {
-      const { toolbarService, toolGroupService, uiDialogService, uiModalService, customizationService } =
+      const {
+        toolbarService,
+        toolGroupService,
+        uiDialogService,
+        uiModalService,
+        customizationService,
+        displaySetService,
+      } =
         servicesManager.services;
 
       uiDialogService?.hideAll?.();
@@ -326,6 +337,52 @@ function modeFactory({ modeConfiguration }) {
 
       setSeriesFromQuery({ servicesManager, commandsManager });
       void ensureOviSegmentationForViewport(servicesManager);
+      window.setTimeout(() => {
+        void ensureOviSegmentationForViewport(servicesManager);
+      }, 250);
+      window.setTimeout(() => {
+        void ensureOviSegmentationForViewport(servicesManager);
+      }, 1000);
+
+      if (displaySetService?.subscribe) {
+        const ensureSegmentation = () => {
+          void ensureOviSegmentationForViewport(servicesManager);
+        };
+        displaySetSubscriptions = [
+          displaySetService.subscribe(displaySetService.EVENTS.DISPLAY_SETS_CHANGED, ensureSegmentation),
+          displaySetService.subscribe(displaySetService.EVENTS.DISPLAY_SETS_ADDED, ensureSegmentation),
+        ];
+      }
+
+      if (typeof window !== 'undefined') {
+        (window as any).__medexSegmentationTestApi = {
+          completeManualContour: ({
+            viewportId,
+            referencedImageId,
+            worldPolyline,
+            mode,
+          }: {
+            viewportId?: string;
+            referencedImageId: string;
+            worldPolyline: number[][];
+            mode?: 'draw' | 'erase';
+          }) => {
+            const activeViewportId =
+              viewportId || servicesManager.services.viewportGridService?.getState?.()?.activeViewportId;
+            if (!activeViewportId) {
+              return Promise.resolve(null);
+            }
+
+            return writeContourToActiveSegmentation({
+              servicesManager,
+              viewportId: activeViewportId,
+              referencedImageId,
+              worldPolyline,
+              mode: mode === 'erase' ? 'erase' : 'draw',
+            });
+          },
+        };
+      }
     },
     onModeExit: ({ servicesManager }: withAppTypes) => {
       const { toolGroupService, uiDialogService, uiModalService } = servicesManager.services;
@@ -342,6 +399,11 @@ function modeFactory({ modeConfiguration }) {
       teardownMaskContourBehavior = undefined;
       teardownManipulationToolsCursor?.();
       teardownManipulationToolsCursor = undefined;
+      displaySetSubscriptions.forEach(subscription => subscription.unsubscribe?.());
+      displaySetSubscriptions = [];
+      if (typeof window !== 'undefined') {
+        delete (window as any).__medexSegmentationTestApi;
+      }
     },
     validationTags: {
       study: [],

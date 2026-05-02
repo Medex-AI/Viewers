@@ -1,0 +1,16 @@
+{
+  "name": "@ohif/mode-cvi-labs",
+  "version": "3.11.0-beta.11",
+  "description": "OHIF mode for cardiac cine MRI analysis (CVI Labs)",
+  "author": "MedEx",
+  "license": "MIT",
+  "module": "src/index.ts",
+  "peerDependencies": {
+    "@ohif/core": "3.11.0-beta.11",
+    "@ohif/extension-cornerstone": "3.11.0-beta.11",
+    "@ohif/extension-cornerstone-dicom-rt": "3.11.0-beta.11",
+    "@ohif/extension-cornerstone-dicom-seg": "3.11.0-beta.11",
+    "@ohif/extension-default": "3.11.0-beta.11",
+    "@medex/cvi-labs": "*"
+  }
+}

@@ -47,17 +47,21 @@ export const openSegmentationStudy = async (
 export const waitForAutoCreatedLabelmap = async (page: any, requireLabelCard = true) => {
   await page.waitForFunction(
     () => {
-      const services = (window as any).services;
-      const segmentationService = services?.segmentationService;
-      const viewportGridService = services?.viewportGridService;
-      const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
-      const activeSegmentation = activeViewportId
-        ? segmentationService?.getActiveSegmentation?.(activeViewportId)
-        : null;
+      try {
+        const services = (window as any).services;
+        const segmentationService = services?.segmentationService;
+        const viewportGridService = services?.viewportGridService;
+        const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+        const activeSegmentation = activeViewportId
+          ? segmentationService?.getActiveSegmentation?.(activeViewportId)
+          : null;
 
-      return Boolean(
-        activeSegmentation?.segmentationId || segmentationService?.getSegmentations?.()?.length
-      );
+        return Boolean(
+          activeSegmentation?.segmentationId || segmentationService?.getSegmentations?.()?.length
+        );
+      } catch {
+        return false;
+      }
     },
     undefined,
     { timeout: AUTO_LOAD_TIMEOUT_MS }

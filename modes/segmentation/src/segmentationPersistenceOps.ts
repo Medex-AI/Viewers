@@ -11,6 +11,8 @@ import {
 } from '../../../medex/segmentation/src/services/SegmentationPersistenceAdapter';
 import {
   bindSegmentationDocument,
+  createBoundSegmentationDocument,
+  getBoundSegmentationDocument,
   listSegmentationDocuments,
 } from '../../../medex/segmentation/src/persistence/segmentationContractClient';
 import {
@@ -733,6 +735,28 @@ export const saveAllFrames = async (
   const segmentCount = Object.keys(labelMap).length;
   let wroteAnyFrame = false;
 
+  if (!getBoundSegmentationDocument(segmentationId) && segmentCount > 0) {
+    await createBoundSegmentationDocument({
+      localSegmentationId: segmentationId,
+      studyInstanceUID,
+      seriesInstanceUID,
+      displaySetInstanceUID: segState?.cachedStats?.displaySetInstanceUID,
+      label: segmentationLabel || 'Segmentation',
+      labels: Object.fromEntries(
+        Object.entries(labelMap).map(([segmentIndex, label]: [string, any]) => [
+          Number(segmentIndex),
+          {
+            name: label?.labelName,
+            color: label?.labelColor,
+            locked: label?.labelLocked,
+          },
+        ])
+      ),
+    }).catch(error => {
+      console.warn('Failed to create bound segmentation document during saveAllFrames:', error);
+    });
+  }
+
   const hasDynamicSegmentation =
     segmentationService.hasDynamicSegmentation?.(segmentationId) || false;
   const labelmapVolume = getLabelmapVolumeFromData(labelmapData);
@@ -1307,7 +1331,8 @@ export const getDisplaySetReferenceImageIds = (displaySet: any): string[] => {
 
 export const findExistingSegmentationForDisplaySet = (
   displaySet: any,
-  segmentationService: any
+  segmentationService: any,
+  viewportId?: string
 ): string | undefined => {
   const displaySetReferenceImageIds = getDisplaySetReferenceImageIds(displaySet);
   if (!displaySetReferenceImageIds.length) return;
@@ -1316,17 +1341,28 @@ export const findExistingSegmentationForDisplaySet = (
     displaySetReferenceImageIds.map(imageId => getStableFrameKey(imageId) || imageId)
   );
 
-  const segmentations = segmentationService.getSegmentations?.() ?? [];
-  for (const existingSeg of segmentations) {
+  const segmentationMatchesDisplaySet = (existingSeg: any) => {
     const labelmapData = existingSeg?.representationData?.[
       toolEnums.SegmentationRepresentations.Labelmap
     ] as { referencedImageIds?: string[] } | undefined;
     const referencedImageIds = labelmapData?.referencedImageIds ?? [];
-    if (referencedImageIds.length !== displaySetReferenceImageIds.length) continue;
-    const matches = referencedImageIds.every(id =>
-      displaySetFrameKeys.has(getStableFrameKey(id) || id)
-    );
-    if (matches) return existingSeg.segmentationId;
+    if (referencedImageIds.length !== displaySetReferenceImageIds.length) {
+      return false;
+    }
+
+    return referencedImageIds.every(id => displaySetFrameKeys.has(getStableFrameKey(id) || id));
+  };
+
+  const activeSegmentation = viewportId
+    ? segmentationService.getActiveSegmentation?.(viewportId)
+    : null;
+  if (activeSegmentation && segmentationMatchesDisplaySet(activeSegmentation)) {
+    return activeSegmentation.segmentationId;
+  }
+
+  const segmentations = segmentationService.getSegmentations?.() ?? [];
+  for (const existingSeg of segmentations) {
+    if (segmentationMatchesDisplaySet(existingSeg)) return existingSeg.segmentationId;
   }
 };
 
@@ -1357,15 +1393,28 @@ export const tryAutoCreateSegmentationFromBackend = async (
   const viewportRepresentations =
     segmentationService.getSegmentationRepresentations?.(viewportId) ?? [];
   if (viewportRepresentations.length) {
+    const activeSegmentationId = segmentationService.getActiveSegmentation?.(viewportId)?.segmentationId;
+    const attachedSegmentationId = viewportRepresentations.some(
+      rep => rep.segmentationId === activeSegmentationId
+    )
+      ? activeSegmentationId
+      : viewportRepresentations[0]?.segmentationId;
+
+    if (attachedSegmentationId) {
+      segmentationService.setActiveSegmentation?.(viewportId, attachedSegmentationId);
+    }
+
     segLoadLog('autoCreate:SKIP-existing-representation', {
       viewportId,
       displaySetInstanceUID,
       representationCount: viewportRepresentations.length,
+      attachedSegmentationId,
     });
     logSegmentationTimeline('autoCreate:skip-existing-viewport-representation', {
       viewportId,
       displaySetInstanceUID,
       representationCount: viewportRepresentations.length,
+      attachedSegmentationId,
       segmentationIds: viewportRepresentations.map(rep => rep.segmentationId),
     });
     state?.autoCreateDoneDisplaySetUIDs.add(displaySetInstanceUID);
@@ -1410,7 +1459,8 @@ export const tryAutoCreateSegmentationFromBackend = async (
   // Restore existing in-memory segmentation for this display set if one exists
   const existingSegmentationId = findExistingSegmentationForDisplaySet(
     displaySet,
-    segmentationService
+    segmentationService,
+    viewportId
   );
   if (existingSegmentationId) {
     const existingPhase = getPhase(existingSegmentationId);

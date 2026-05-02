@@ -29,6 +29,7 @@ const IS_COVERAGE = process.env.COVERAGE === 'true';
 const OHIF_PORT = Number(process.env.OHIF_PORT || 3000);
 const OHIF_HOST = process.env.OHIF_HOST || '0.0.0.0';
 const OHIF_ALLOWED_HOSTS = process.env.OHIF_ALLOWED_HOSTS;
+const DEFAULT_ALLOWED_HOSTS = ['jkoxhome.duckdns.org'];
 const ENTRY_TARGET = process.env.ENTRY_TARGET || `${SRC_DIR}/index.js`;
 const Dotenv = require('dotenv-webpack');
 const writePluginImportFile = require('./writePluginImportsFile.js');
@@ -58,8 +59,15 @@ module.exports = (env, argv) => {
   const isProdBuild = process.env.NODE_ENV === 'production';
   const hasProxy = PROXY_TARGET && PROXY_DOMAIN;
   const allowedHosts = OHIF_ALLOWED_HOSTS
-    ? OHIF_ALLOWED_HOSTS.split(',').map(host => host.trim()).filter(Boolean)
-    : 'auto';
+    ? Array.from(
+        new Set(
+          OHIF_ALLOWED_HOSTS.split(',')
+            .map(host => host.trim())
+            .filter(Boolean)
+            .concat(DEFAULT_ALLOWED_HOSTS)
+        )
+      )
+    : DEFAULT_ALLOWED_HOSTS;
 
   const mergedConfig = merge(baseConfig, {
     entry: {

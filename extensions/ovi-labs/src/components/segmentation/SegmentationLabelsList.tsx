@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { DropdownMenuItem, SegmentCard } from '@ohif/ui-next';
+import {
+  DropdownMenuItem,
+  SegmentCard,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@ohif/ui-next';
 import { DicomMetadataStore } from '@ohif/core';
 import { annotation } from '@cornerstonejs/tools';
 import { getRenderingEngines } from '@cornerstonejs/core';
@@ -16,6 +24,10 @@ import {
 import {
   ensureOviSegmentationForViewport,
   getOviSegmentIndexForLabelId,
+  activateOviCompatibleSegmentation,
+  createOviSegmentationImportCopy,
+  isOviCompatibleSegmentation,
+  OVI_SEGMENTATION_LABELS,
 } from '../../utils/oviSegmentation';
 
 interface SegmentationLabelsListProps {
@@ -39,6 +51,12 @@ const MASK_LABEL = { id: 'mask', name: 'Mask', color: '#94A3B8' };
 const DEFAULT_LABEL_OPACITY = 0.2;
 const OVI_ACTIVE_LABEL_EVENT = 'ovi-set-active-label';
 
+type SegmentationOption = {
+  segmentationId: string;
+  label: string;
+  segments: Record<number, any>;
+};
+
 const getInitialActiveLabelId = () => {
   return '';
 };
@@ -53,9 +71,40 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
   const [maskRevision, setMaskRevision] = useState(0);
   const [opacityOverrides, setOpacityOverrides] = useState<Record<string, number>>({});
   const [activeLabelId, setActiveLabelId] = useState<string>(getInitialActiveLabelId);
+  const [segmentationOptions, setSegmentationOptions] = useState<SegmentationOption[]>([]);
+  const [activeSegmentationId, setActiveSegmentationId] = useState<string>('');
+  const [mappingSource, setMappingSource] = useState<SegmentationOption | null>(null);
+  const [labelMapping, setLabelMapping] = useState<Record<number, string>>({});
 
   const uiNotificationService = servicesManager?.services?.uiNotificationService;
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
+
+  const refreshSegmentationOptions = useCallback(() => {
+    const segmentationService = servicesManager?.services?.segmentationService;
+    if (!segmentationService) {
+      return;
+    }
+
+    const activeSegmentation = activeViewportId
+      ? segmentationService.getActiveSegmentation?.(activeViewportId)
+      : null;
+    const nextOptions = (segmentationService.getSegmentations?.() || []).map(segmentation => ({
+      segmentationId: segmentation.segmentationId,
+      label: segmentation.label || 'Segmentation',
+      segments: Object.fromEntries(
+        Object.entries(segmentation.segments || {}).map(([segmentIndex, segment]: [string, any]) => [
+          Number(segmentIndex),
+          {
+            ...segment,
+            segmentIndex: segment.segmentIndex ?? Number(segmentIndex),
+          },
+        ])
+      ),
+    }));
+
+    setSegmentationOptions(nextOptions);
+    setActiveSegmentationId(activeSegmentation?.segmentationId || '');
+  }, [activeViewportId, servicesManager]);
 
   const totalFrameCount = useMemo(() => {
     if (!activeViewportId || !servicesManager) {
@@ -192,6 +241,24 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
   }, []);
 
   useEffect(() => {
+    refreshSegmentationOptions();
+    const segmentationService = servicesManager?.services?.segmentationService;
+    if (!segmentationService?.subscribe) {
+      return;
+    }
+
+    const events = [
+      segmentationService.EVENTS?.SEGMENTATION_ADDED,
+      segmentationService.EVENTS?.SEGMENTATION_MODIFIED,
+      segmentationService.EVENTS?.SEGMENTATION_REMOVED,
+      segmentationService.EVENTS?.ACTIVE_SEGMENTATION_CHANGED,
+    ].filter(Boolean);
+    const subscriptions = events.map(event => segmentationService.subscribe(event, refreshSegmentationOptions));
+
+    return () => subscriptions.forEach(subscription => subscription.unsubscribe());
+  }, [refreshSegmentationOptions, servicesManager]);
+
+  useEffect(() => {
     const handler = (evt: Event) => {
       const labelId = (evt as CustomEvent)?.detail?.labelId;
       if (labelId) {
@@ -231,6 +298,76 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
       });
     }
   };
+
+  const handleSegmentationSelect = useCallback(
+    async (segmentationId: string) => {
+      const selected = segmentationOptions.find(option => option.segmentationId === segmentationId);
+      if (!selected || !servicesManager) {
+        return;
+      }
+
+      if (isOviCompatibleSegmentation(selected)) {
+        await activateOviCompatibleSegmentation({
+          servicesManager,
+          viewportId: activeViewportId,
+          segmentationId,
+        });
+        refreshSegmentationOptions();
+        return;
+      }
+
+      const initialMapping = Object.fromEntries(
+        OVI_SEGMENTATION_LABELS.map(label => {
+          const exactMatch = Object.values(selected.segments).find(
+            (segment: any) => segment?.label === label.name
+          ) as any;
+          return [label.segmentIndex, exactMatch?.segmentIndex ? String(exactMatch.segmentIndex) : ''];
+        })
+      );
+      setLabelMapping(initialMapping);
+      setMappingSource(selected);
+    },
+    [activeViewportId, refreshSegmentationOptions, segmentationOptions, servicesManager]
+  );
+
+  const handleCreateImportCopy = useCallback(async () => {
+    if (!mappingSource || !servicesManager) {
+      return;
+    }
+
+    const mapping = Object.fromEntries(
+      Object.entries(labelMapping).map(([targetSegmentIndex, sourceSegmentIndex]) => [
+        Number(targetSegmentIndex),
+        Number(sourceSegmentIndex),
+      ])
+    );
+
+    if (OVI_SEGMENTATION_LABELS.some(label => !mapping[label.segmentIndex])) {
+      uiNotificationService?.show?.({
+        title: 'Import Label Mapping',
+        message: 'Map all OVI labels before creating the import copy.',
+        type: 'warning',
+        duration: 3000,
+      });
+      return;
+    }
+
+    await createOviSegmentationImportCopy({
+      servicesManager,
+      viewportId: activeViewportId,
+      sourceSegmentationId: mappingSource.segmentationId,
+      mapping,
+    });
+    setMappingSource(null);
+    refreshSegmentationOptions();
+  }, [
+    activeViewportId,
+    labelMapping,
+    mappingSource,
+    refreshSegmentationOptions,
+    servicesManager,
+    uiNotificationService,
+  ]);
 
   const handleVisibilityChange = (labelId: string, visible: boolean) => {
     setLabelVisibility(labelId, visible, {
@@ -378,6 +515,35 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
 
   return (
     <div className="flex flex-col gap-2">
+      {segmentationOptions.length ? (
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+            Active Segmentation
+          </label>
+          <Select
+            value={activeSegmentationId}
+            onValueChange={handleSegmentationSelect}
+          >
+            <SelectTrigger
+              aria-label="OVI active segmentation"
+              className="h-8 w-full border-gray-700 bg-gray-900 text-xs text-white"
+            >
+              <SelectValue placeholder="Select segmentation" />
+            </SelectTrigger>
+            <SelectContent>
+              {segmentationOptions.map(option => (
+                <SelectItem
+                  key={option.segmentationId}
+                  value={option.segmentationId}
+                >
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
+
       {sectionConfigs.map(section => (
         <div
           key={section.key}
@@ -468,6 +634,82 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
           })}
         </div>
       ))}
+
+      {mappingSource ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="ovi-import-label-mapping-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        >
+          <div className="w-full max-w-md rounded-lg border border-gray-700 bg-gray-950 p-4 shadow-xl">
+            <h2
+              id="ovi-import-label-mapping-title"
+              className="text-base font-semibold text-white"
+            >
+              Create Import Label Mapping
+            </h2>
+            <p className="mt-2 text-xs leading-5 text-gray-300">
+              Map labels from "{mappingSource.label}" to the four OVI regions. OVI Labs will create
+              a new shared segmentation named Ovi Lab and leave the source segmentation unchanged.
+            </p>
+            <div className="mt-4 flex flex-col gap-3">
+              {OVI_SEGMENTATION_LABELS.map(label => (
+                <div
+                  key={label.segmentIndex}
+                  className="flex flex-col gap-1"
+                >
+                  <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                    {label.name}
+                  </label>
+                  <Select
+                    value={labelMapping[label.segmentIndex] || ''}
+                    onValueChange={value =>
+                      setLabelMapping(prev => ({
+                        ...prev,
+                        [label.segmentIndex]: value,
+                      }))
+                    }
+                  >
+                    <SelectTrigger
+                      aria-label={label.name}
+                      className="h-8 w-full border-gray-700 bg-gray-900 text-xs text-white"
+                    >
+                      <SelectValue placeholder="Select source label" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.values(mappingSource.segments).map((segment: any) => (
+                        <SelectItem
+                          key={segment.segmentIndex}
+                          value={String(segment.segmentIndex)}
+                        >
+                          {segment.label || `Segment ${segment.segmentIndex}`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ))}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-800"
+                onClick={() => setMappingSource(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded bg-cyan-500 px-3 py-1.5 text-xs font-medium text-black hover:bg-cyan-400"
+                onClick={() => void handleCreateImportCopy()}
+              >
+                Create Import Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

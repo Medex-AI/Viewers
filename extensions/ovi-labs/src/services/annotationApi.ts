@@ -23,14 +23,14 @@ const getCandidateBases = (baseUrl: string): string[] => {
   const normalized = normalizeAuthBase(baseUrl);
 
   if (normalized.startsWith('/')) {
+    bases.add(normalized);
+
     if (
       typeof window !== 'undefined' &&
       ['localhost', '127.0.0.1'].includes(window.location.hostname)
     ) {
       bases.add(`${window.location.protocol}//${window.location.hostname}:5000/api`);
     }
-
-    bases.add(normalized);
   } else {
     bases.add(normalized);
   }

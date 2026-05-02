@@ -10,7 +10,8 @@
     "test:unit:ci": "jest --ci --runInBand --passWithNoTests"
   },
   "peerDependencies": {
-    "@ohif/core": "*"
+    "@ohif/core": "*",
+    "recharts": "*"
   },
   "dependencies": {
     "@medex/segmentation": "*",
