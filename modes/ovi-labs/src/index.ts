@@ -2,7 +2,7 @@ import { id } from './id';
 import toolbarButtons from './toolbarButtons';
 import initToolGroups from './initToolGroups';
 import { isSuitableForOviLabs } from './utils/seriesValidator';
-import setupRotatableRectangleROIBehavior from './utils/setupRotatableRectangleROIBehavior';
+import { setupRotatableRectangleROIBehavior } from '@medex/segmentation';
 import setupManualContourBehavior, {
   getActiveManualContourLabelId,
   setActiveManualContourLabelId,
@@ -309,10 +309,18 @@ function modeFactory({ modeConfiguration }) {
     'MoreTools',
     'Cine',
     'RotatableRectangleROI',
-    'ManualContour',
-    'Brush',
+    'ContourTools',
+    'BrushTools',
     'MaskContour',
   ]);
+      toolbarService.createButtonSection('contourToolsSection', [
+        'ManualContour',
+        'ManualContourEraser',
+      ]);
+      toolbarService.createButtonSection('brushToolsSection', [
+        'Brush',
+        'Eraser',
+      ]);
       toolbarService.createButtonSection('measurementSection', [
         'Length',
         'Bidirectional',
@@ -439,9 +447,6 @@ function modeFactory({ modeConfiguration }) {
                 {
                   namespace: cornerstone.viewport,
                   displaySetsToDisplay: [ohif.sopClassHandler],
-                  viewportOptions: {
-                    viewportType: 'stack',
-                  },
                 },
               ],
             },
@@ -450,7 +455,7 @@ function modeFactory({ modeConfiguration }) {
       },
     ],
     extensions: extensionDependencies,
-    hangingProtocol: 'default',
+    hangingProtocol: ['@ohif/mnGrid'],
     sopClassHandlers: [dicomVideo.sopClassHandler, ohif.sopClassHandler],
     ...modeConfiguration,
   };

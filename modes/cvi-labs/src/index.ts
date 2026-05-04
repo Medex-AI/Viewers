@@ -1,14 +1,52 @@
 import { eventTarget } from '@cornerstonejs/core';
-import { annotation, Enums as toolEnums } from '@cornerstonejs/tools';
-import toolbarButtons from '../../ovi-labs/src/toolbarButtons';
-import initToolGroups from '../../ovi-labs/src/initToolGroups';
+import { annotation, Enums as toolEnums, utilities } from '@cornerstonejs/tools';
+import {
+  initSegmentationToolGroups as initToolGroups,
+  ManualContourLabelMenu,
+  setupRotatableRectangleROIBehavior,
+  segmentationToolbarButtons as toolbarButtons,
+  syncManualContourColor,
+  writeContourToOhifLabelmap,
+} from '@medex/segmentation';
+import { setSegmentationPersistenceStatus } from '../../../extensions/cornerstone/src/utils/segmentationPersistenceStatus';
 import { saveAllFrames } from '../../segmentation/src/segmentationPersistenceOps';
-import { writeContourToOhifLabelmap } from '../../segmentation/src/writeContourToOhifLabelmap';
 import { ensureCviSegmentationForViewport } from '../../../specialties/cvi-labs/src/utils/cviSegmentation';
+import { CVI_LABELS } from '../../../specialties/cvi-labs/src/stores/cviLabsSegmentationStore';
 
 const id = '@ohif/mode-cvi-labs';
 
 const DEFAULT_BRUSH_SIZE_MM = 3;
+const BRUSH_SIZE_MIN_MM = 0.5;
+const BRUSH_SIZE_MAX_MM = 99.5;
+const TOOL_GROUP_ID = 'default';
+const MANUAL_CONTOUR_TOOL_NAME = 'ManualContour';
+const BRUSH_TOOL_NAMES = ['CircularBrush', 'CircularEraser'];
+const CVI_ACTIVE_LABEL_EVENT = 'cvi-set-active-label';
+const ERASER_LABEL_ID = 'eraser';
+const ERASER_LABEL_COLOR = '#FFFFFF';
+
+const { segmentation: segmentationUtils } = utilities as typeof utilities & {
+  segmentation?: {
+    getBrushSizeForToolGroup?: (toolGroupId: string) => number;
+  };
+};
+
+const setGlobalActiveManualContourLabelId = (labelId: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  (window as Window & { __oviActiveManualContourLabelId?: string }).__oviActiveManualContourLabelId =
+    labelId;
+};
+
+const setGlobalActiveManualContourColor = (color: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  (window as Window & { __oviActiveManualContourColor?: string }).__oviActiveManualContourColor = color;
+};
 
 const ohif = {
   layout: '@ohif/extension-default.layoutTemplateModule.viewerLayout',
@@ -38,8 +76,13 @@ function modeFactory() {
   let _segmentationSubscriptions: Array<{ unsubscribe?: () => void }> = [];
   let _displaySetSubscriptions: Array<{ unsubscribe?: () => void }> = [];
   let _onContourCompleted: ((evt: Event) => void) | null = null;
+  let _onToolActivated: ((evt: Event) => void) | null = null;
   let _onKeyDown: ((evt: KeyboardEvent) => void) | null = null;
+  let _teardownRotatableRectangleROIBehavior: (() => void) | null = null;
   const _saveDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let _activeManualContourLabelId = CVI_LABELS[0].id;
+  let _lastNonEraserManualContourLabelId = CVI_LABELS[0].id;
+  let _currentBrushSize = DEFAULT_BRUSH_SIZE_MM;
 
   return {
     id,
@@ -58,10 +101,132 @@ function modeFactory() {
         uiModalService,
       } = servicesManager.services;
 
+      const clampBrushSize = (value: number) =>
+        Math.min(BRUSH_SIZE_MAX_MM, Math.max(BRUSH_SIZE_MIN_MM, Number(value) || DEFAULT_BRUSH_SIZE_MM));
+
+      const getBrushSize = () => {
+        const brushSize = segmentationUtils?.getBrushSizeForToolGroup?.(TOOL_GROUP_ID);
+        if (typeof brushSize === 'number' && !Number.isNaN(brushSize)) {
+          _currentBrushSize = clampBrushSize(brushSize);
+        }
+
+        return _currentBrushSize;
+      };
+
+      const setBrushSize = (value: number) => {
+        const brushSize = clampBrushSize(value);
+        _currentBrushSize = brushSize;
+        commandsManager.runCommand('setBrushSize', {
+          value: brushSize,
+          toolNames: BRUSH_TOOL_NAMES,
+        });
+      };
+
+      const getManualContourMenuPosition = (sourceToolName = MANUAL_CONTOUR_TOOL_NAME) => {
+        if (typeof window === 'undefined') {
+          return undefined;
+        }
+
+        const panelWidth = 240;
+        const margin = 16;
+        const toolButton =
+          window.document?.querySelector(`[data-tool="${sourceToolName}"]`) ||
+          window.document?.querySelector(`[data-tool="Brush"]`) ||
+          window.document?.querySelector(`[data-tool="${MANUAL_CONTOUR_TOOL_NAME}"]`);
+
+        if (toolButton instanceof HTMLElement) {
+          const rect = toolButton.getBoundingClientRect();
+          const x = Math.min(
+            window.innerWidth - panelWidth - margin,
+            Math.max(margin, rect.left + rect.width / 2 - panelWidth / 2)
+          );
+          const y = Math.min(window.innerHeight - margin, rect.bottom + 8);
+          return { x, y };
+        }
+
+        return {
+          x: Math.max(margin, window.innerWidth - panelWidth - margin),
+          y: 96,
+        };
+      };
+
+      const updateActiveCviLabel = async (labelId: string, sourceToolName = MANUAL_CONTOUR_TOOL_NAME) => {
+        const isEraser = labelId === ERASER_LABEL_ID;
+        const label = CVI_LABELS.find(item => item.id === labelId) || CVI_LABELS[0];
+        const context = await ensureForViewport(viewportGridService?.getState?.()?.activeViewportId);
+        const viewportId = context?.viewportId || viewportGridService?.getState?.()?.activeViewportId;
+        const segmentationId = context?.segmentationId;
+
+        _activeManualContourLabelId = isEraser ? ERASER_LABEL_ID : label.id;
+        if (!isEraser) {
+          _lastNonEraserManualContourLabelId = label.id;
+        }
+
+        commandsManager.runCommand('setManualContourMode', {
+          mode: isEraser ? 'erase' : 'draw',
+        });
+
+        setGlobalActiveManualContourLabelId(isEraser ? _lastNonEraserManualContourLabelId : label.id);
+        setGlobalActiveManualContourColor(isEraser ? ERASER_LABEL_COLOR : label.color);
+        window?.dispatchEvent?.(
+          new CustomEvent(CVI_ACTIVE_LABEL_EVENT, {
+            detail: {
+              labelId: isEraser ? ERASER_LABEL_ID : label.id,
+              sourceToolName,
+              _isFromTool: true,
+            },
+          })
+        );
+
+        if (!isEraser && viewportId && segmentationId) {
+          segmentationService.setActiveSegmentation(viewportId, segmentationId);
+          segmentationService.setActiveSegment(segmentationId, label.segmentIndex);
+          syncManualContourColor(viewportId, segmentationId, segmentationService);
+        }
+      };
+
+      const showManualContourLabelMenu = (sourceToolName = MANUAL_CONTOUR_TOOL_NAME) => {
+        uiDialogService?.hide?.('manual-contour-label');
+        uiDialogService?.show?.({
+          id: 'manual-contour-label',
+          title: '',
+          content: ManualContourLabelMenu,
+          unstyled: true,
+          showOverlay: false,
+          shouldCloseOnOverlayClick: true,
+          shouldCloseOnEsc: true,
+          containerClassName: 'shadow-none',
+          defaultPosition: getManualContourMenuPosition(sourceToolName),
+          contentProps: {
+            labelData: CVI_LABELS.map(item => ({
+              label: item.name,
+              value: item.id,
+              color: item.color,
+            })),
+            initialLabel:
+              _activeManualContourLabelId === ERASER_LABEL_ID
+                ? _lastNonEraserManualContourLabelId
+                : _activeManualContourLabelId,
+            brushSize: getBrushSize(),
+            showBrushSizeControl: BRUSH_TOOL_NAMES.includes(sourceToolName),
+            onBrushSizeChange: (value: number) => setBrushSize(value),
+            onSelect: (value: string) => {
+              if (!value) {
+                return;
+              }
+
+              void updateActiveCviLabel(value, sourceToolName);
+            },
+          },
+        });
+      };
+
       uiDialogService?.hideAll?.();
       uiModalService?.hide?.();
 
       initToolGroups(extensionManager, toolGroupService, commandsManager);
+      _teardownRotatableRectangleROIBehavior?.();
+      _teardownRotatableRectangleROIBehavior = setupRotatableRectangleROIBehavior();
       commandsManager.runCommand('setBrushSize', {
         value: DEFAULT_BRUSH_SIZE_MM,
         toolNames: ['CircularBrush', 'CircularEraser'],
@@ -78,9 +243,17 @@ function modeFactory() {
         'MoreTools',
         'Cine',
         'RotatableRectangleROI',
-        'ManualContour',
-        'Brush',
+        'ContourTools',
+        'BrushTools',
         'MaskContour',
+      ]);
+      toolbarService.createButtonSection('contourToolsSection', [
+        'ManualContour',
+        'ManualContourEraser',
+      ]);
+      toolbarService.createButtonSection('brushToolsSection', [
+        'Brush',
+        'Eraser',
       ]);
       toolbarService.createButtonSection('measurementSection', [
         'Length',
@@ -118,10 +291,32 @@ function modeFactory() {
         );
       };
 
-      const ensureForViewport = async (viewportId?: string) => {
-        const context = await ensureCviSegmentationForViewport(servicesManager, viewportId);
-        return context?.segmentationId || null;
+      const markSegmentationDirty = (segmentationId: string) => {
+        const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
+        const activeSegmentation = activeViewportId
+          ? segmentationService.getActiveSegmentation(activeViewportId)
+          : null;
+
+        if (!activeViewportId || !activeSegmentation) {
+          return;
+        }
+
+        const activeSegmentationId = activeSegmentation.segmentationId || activeSegmentation.id;
+        if (activeSegmentationId !== segmentationId) {
+          return;
+        }
+
+        setSegmentationPersistenceStatus(activeViewportId, {
+          kind: 'dirty',
+          message: 'Segmentation has unsaved changes.',
+        });
       };
+
+      const ensureForViewport = async (viewportId?: string) => {
+        return ensureCviSegmentationForViewport(servicesManager, viewportId);
+      };
+
+      void updateActiveCviLabel(_activeManualContourLabelId);
 
       const activeViewportId = viewportGridService?.getState?.()?.activeViewportId;
       void ensureForViewport(activeViewportId);
@@ -164,6 +359,7 @@ function modeFactory() {
           segmentationService.EVENTS.SEGMENTATION_DATA_MODIFIED,
           ({ segmentationId }: { segmentationId: string }) => {
             if (segmentationId) {
+              markSegmentationDirty(segmentationId);
               scheduleAutosave(segmentationId);
             }
           }
@@ -172,6 +368,7 @@ function modeFactory() {
           segmentationService.EVENTS.SEGMENTATION_MODIFIED,
           ({ segmentationId }: { segmentationId: string }) => {
             if (segmentationId) {
+              markSegmentationDirty(segmentationId);
               scheduleAutosave(segmentationId);
             }
           }
@@ -212,7 +409,43 @@ function modeFactory() {
           });
       };
 
+      _onToolActivated = (evt: Event) => {
+        const { toolGroupId, toolName } = (evt as CustomEvent).detail || {};
+        if (toolGroupId !== TOOL_GROUP_ID) {
+          return;
+        }
+
+        if (toolName === MANUAL_CONTOUR_TOOL_NAME) {
+          const isEraseMode =
+            typeof window !== 'undefined' &&
+            (window as any).__medexManualContourMode === 'erase';
+          if (!isEraseMode) {
+            void updateActiveCviLabel(
+              _activeManualContourLabelId,
+              MANUAL_CONTOUR_TOOL_NAME
+            ).then(() => {
+              showManualContourLabelMenu(MANUAL_CONTOUR_TOOL_NAME);
+            });
+          }
+          return;
+        }
+
+        if (BRUSH_TOOL_NAMES.includes(toolName)) {
+          const labelId =
+            toolName === 'CircularEraser' || _activeManualContourLabelId === ERASER_LABEL_ID
+              ? _lastNonEraserManualContourLabelId
+              : _activeManualContourLabelId;
+          void updateActiveCviLabel(labelId, toolName).then(() => {
+            showManualContourLabelMenu(toolName);
+          });
+          return;
+        }
+
+        uiDialogService?.hide?.('manual-contour-label');
+      };
+
       eventTarget.addEventListener(toolEnums.Events.ANNOTATION_COMPLETED, _onContourCompleted);
+      eventTarget.addEventListener(toolEnums.Events.TOOL_ACTIVATED, _onToolActivated);
 
       if (typeof window !== 'undefined') {
         (window as any).__medexSegmentationTestApi = {
@@ -259,6 +492,9 @@ function modeFactory() {
             });
             return segmentationId;
           },
+          getActiveManualContourLabelId: () => _activeManualContourLabelId,
+          getManualContourMode: () =>
+            typeof window !== 'undefined' ? (window as any).__medexManualContourMode || 'draw' : 'draw',
         };
       }
 
@@ -298,10 +534,18 @@ function modeFactory() {
         _onContourCompleted = null;
       }
 
+      if (_onToolActivated) {
+        eventTarget.removeEventListener(toolEnums.Events.TOOL_ACTIVATED, _onToolActivated);
+        _onToolActivated = null;
+      }
+
       if (_onKeyDown) {
         window.removeEventListener('keydown', _onKeyDown);
         _onKeyDown = null;
       }
+
+      _teardownRotatableRectangleROIBehavior?.();
+      _teardownRotatableRectangleROIBehavior = null;
 
       if (typeof window !== 'undefined') {
         delete (window as any).__medexSegmentationTestApi;
@@ -337,7 +581,6 @@ function modeFactory() {
               {
                 namespace: cornerstone.viewport,
                 displaySetsToDisplay: [ohif.sopClassHandler],
-                viewportOptions: { viewportType: 'stack' },
               },
             ],
           },
@@ -346,7 +589,7 @@ function modeFactory() {
     ],
 
     extensions: extensionDependencies,
-    hangingProtocol: 'default',
+    hangingProtocol: ['@ohif/mnGrid'],
     sopClassHandlers: [ohif.sopClassHandler],
   };
 }

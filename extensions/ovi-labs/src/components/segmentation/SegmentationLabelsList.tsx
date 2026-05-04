@@ -10,7 +10,7 @@ import {
 } from '@ohif/ui-next';
 import { DicomMetadataStore } from '@ohif/core';
 import { annotation } from '@cornerstonejs/tools';
-import { getRenderingEngines } from '@cornerstonejs/core';
+import { getRenderingEngines, cache } from '@cornerstonejs/core';
 import {
   SEGMENTATION_LABELS,
   SegmentationLabel,
@@ -26,7 +26,6 @@ import {
   getOviSegmentIndexForLabelId,
   activateOviCompatibleSegmentation,
   createOviSegmentationImportCopy,
-  isOviCompatibleSegmentation,
   OVI_SEGMENTATION_LABELS,
 } from '../../utils/oviSegmentation';
 
@@ -78,6 +77,7 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
 
   const uiNotificationService = servicesManager?.services?.uiNotificationService;
   const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
+  const { displaySetService, viewportGridService } = servicesManager?.services || {};
 
   const refreshSegmentationOptions = useCallback(() => {
     const segmentationService = servicesManager?.services?.segmentationService;
@@ -106,17 +106,107 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
     setActiveSegmentationId(activeSegmentation?.segmentationId || '');
   }, [activeViewportId, servicesManager]);
 
+  // Canonical readViewportNavigation — identical pattern to SegmentCardsList.tsx:123–176.
+  // Returns slice/time navigation state from the active viewport's dynamic volume info (if present).
+  const readViewportNavigation = useCallback(() => {
+    const viewport = cornerstoneViewportService?.getCornerstoneViewport?.(activeViewportId);
+    const imageIds = viewport?.getImageIds?.();
+    const currentIndex = viewport?.getCurrentImageIdIndex?.();
+    const numberOfSlices = viewport?.getNumberOfSlices?.();
+    const safeCurrentIndex = typeof currentIndex === 'number' ? currentIndex : 0;
+    const currentViewportImageId = imageIds?.[safeCurrentIndex];
+    const baseState = {
+      currentSlice: safeCurrentIndex + 1,
+      totalSlices:
+        typeof numberOfSlices === 'number' && numberOfSlices > 0 ? numberOfSlices : imageIds?.length || 1,
+    };
+
+    const { viewports } = viewportGridService?.getState?.() || { viewports: new Map() };
+    const displaySetInstanceUIDs = viewports.get(activeViewportId)?.displaySetInstanceUIDs || [];
+
+    for (const displaySetInstanceUID of displaySetInstanceUIDs) {
+      const displaySet = displaySetService?.getDisplaySetByUID?.(displaySetInstanceUID);
+      if (!displaySet?.isDynamicVolume) {
+        continue;
+      }
+
+      const { dynamicVolumeInfo } = displaySet;
+      const timePoints = dynamicVolumeInfo?.timePoints || [];
+      const volume = cache.getVolume(displaySet.displaySetInstanceUID, true) as
+        | { dimensionGroupNumber?: number }
+        | undefined;
+      const currentTime =
+        volume?.dimensionGroupNumber || dynamicVolumeInfo?.dimensionGroupNumber || 1;
+      const totalTimes = timePoints.length || 1;
+      const currentTimePointImageIds = timePoints[currentTime - 1] || [];
+      const totalSlices =
+        (typeof numberOfSlices === 'number' && numberOfSlices > 0
+          ? numberOfSlices
+          : currentTimePointImageIds.length) || baseState.totalSlices;
+      const currentSliceIndex = currentViewportImageId
+        ? currentTimePointImageIds.indexOf(currentViewportImageId)
+        : -1;
+
+      return {
+        currentSlice:
+          currentSliceIndex >= 0
+            ? currentSliceIndex + 1
+            : Math.min(((safeCurrentIndex % totalSlices) || 0) + 1, totalSlices),
+        totalSlices,
+        currentTime,
+        totalTimes,
+        volumeId: displaySet.displaySetInstanceUID,
+      };
+    }
+
+    return baseState as { currentSlice: number; totalSlices: number; currentTime?: number; totalTimes?: number; volumeId?: string };
+  }, [activeViewportId, cornerstoneViewportService, displaySetService, viewportGridService]);
+
   const totalFrameCount = useMemo(() => {
     if (!activeViewportId || !servicesManager) {
       return 0;
     }
 
-    const cornerstoneViewportService = servicesManager?.services?.cornerstoneViewportService;
     const viewport = cornerstoneViewportService?.getCornerstoneViewport?.(activeViewportId);
     const imageIds = viewport?.getImageIds?.();
 
     return imageIds?.length || 0;
   }, [activeViewportId, servicesManager, revision]);
+
+  const totalTimePoints = useMemo(() => {
+    // Prefer dynamic volume time points from the viewport; fall back to flat frame count.
+    const navigation = readViewportNavigation();
+    if (navigation.totalTimes !== undefined && navigation.totalTimes > 1) {
+      return navigation.totalTimes;
+    }
+    return totalFrameCount;
+  }, [readViewportNavigation, totalFrameCount]);
+
+  const framesPerTimePoint = useMemo(() => {
+    if (totalTimePoints > 1 && totalFrameCount > totalTimePoints) {
+      const ratio = totalFrameCount / totalTimePoints;
+      if (Number.isInteger(ratio)) return ratio;
+    }
+    return 1;
+  }, [totalFrameCount, totalTimePoints]);
+
+  const imageIdIndexMap = useMemo(() => {
+    const viewport = cornerstoneViewportService?.getCornerstoneViewport?.(activeViewportId);
+    const imageIds = viewport?.getImageIds?.() ?? [];
+    const map = new Map<string, number>();
+    imageIds.forEach((id: string, i: number) => map.set(id, i));
+    return map;
+  }, [activeViewportId, cornerstoneViewportService, revision]);
+
+  const currentFrameIndex = useMemo(
+    () => imageIdIndexMap.get(currentImageId ?? '') ?? 0,
+    [imageIdIndexMap, currentImageId]
+  );
+
+  const currentTimeIndex = useMemo(
+    () => (framesPerTimePoint > 1 ? Math.floor(currentFrameIndex / framesPerTimePoint) : 0),
+    [currentFrameIndex, framesPerTimePoint]
+  );
 
   // Check if label has annotation on current frame
   const hasAnnotationOnCurrentFrame = useCallback(
@@ -233,6 +323,48 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
     [activeViewportId, cornerstoneViewportService]
   );
 
+  const stepViewportTime = useCallback(
+    (delta: number) => {
+      if (!delta) {
+        return;
+      }
+
+      const navigation = readViewportNavigation();
+
+      // Primary path: Cornerstone dynamic volume with dimensionGroupNumber (volume viewport).
+      if (navigation.volumeId && navigation.totalTimes) {
+        const nextTime = Math.max(
+          1,
+          Math.min(navigation.totalTimes, (navigation.currentTime || 1) + delta)
+        );
+
+        if (nextTime === navigation.currentTime) {
+          return;
+        }
+
+        const volume = cache.getVolume(navigation.volumeId, true) as
+          | { dimensionGroupNumber?: number }
+          | undefined;
+
+        if (!volume) {
+          return;
+        }
+
+        volume.dimensionGroupNumber = nextTime;
+        const ds = displaySetService?.getDisplaySetByUID?.(navigation.volumeId);
+        if (ds?.dynamicVolumeInfo) {
+          ds.dynamicVolumeInfo.dimensionGroupNumber = nextTime;
+        }
+        cornerstoneViewportService?.getCornerstoneViewport?.(activeViewportId)?.render?.();
+        return;
+      }
+
+      // Last-resort fallback: step by framesPerTimePoint flat frames.
+      stepViewportFrame(delta * framesPerTimePoint);
+    },
+    [activeViewportId, cornerstoneViewportService, displaySetService, framesPerTimePoint, readViewportNavigation, stepViewportFrame]
+  );
+
   useEffect(() => {
     const unsubscribe = subscribeSegmentationState(state => {
       setLabels(state.labels);
@@ -306,26 +438,12 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
         return;
       }
 
-      if (isOviCompatibleSegmentation(selected)) {
-        await activateOviCompatibleSegmentation({
-          servicesManager,
-          viewportId: activeViewportId,
-          segmentationId,
-        });
-        refreshSegmentationOptions();
-        return;
-      }
-
-      const initialMapping = Object.fromEntries(
-        OVI_SEGMENTATION_LABELS.map(label => {
-          const exactMatch = Object.values(selected.segments).find(
-            (segment: any) => segment?.label === label.name
-          ) as any;
-          return [label.segmentIndex, exactMatch?.segmentIndex ? String(exactMatch.segmentIndex) : ''];
-        })
-      );
-      setLabelMapping(initialMapping);
-      setMappingSource(selected);
+      await activateOviCompatibleSegmentation({
+        servicesManager,
+        viewportId: activeViewportId,
+        segmentationId,
+      });
+      refreshSegmentationOptions();
     },
     [activeViewportId, refreshSegmentationOptions, segmentationOptions, servicesManager]
   );
@@ -544,6 +662,10 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
         </div>
       ) : null}
 
+      <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+        Labels
+      </div>
+
       {sectionConfigs.map(section => (
         <div
           key={section.key}
@@ -555,81 +677,120 @@ const SegmentationLabelsList: React.FC<SegmentationLabelsListProps> = ({
             </div>
           ) : null}
           {section.cards.map(card => {
-            const annotatedFrames = card.annotations.length;
-            const frameText = card.isMask
-              ? `Masked Frames ${annotatedFrames}/${totalFrameCount || 0}`
-              : `Annotated Frames ${annotatedFrames}/${totalFrameCount || 0}`;
             const isInteractive = card.annotations.length > 0;
             const isActive = card.id === activeLabelId;
             const selectedLabel = labels.find(label => label.id === card.id);
             const canDeleteCurrentFrame =
               !!selectedLabel && !!currentImageId && hasAnnotationOnCurrentFrame(selectedLabel);
 
+            // Compute annotated slice/frame counts from referencedImageId → frameIndex mapping.
+            let navigationGroups: { key: string; label: string; onStep?: (delta: number) => void; prevTitle?: string; nextTitle?: string }[];
+            if (card.isMask) {
+              navigationGroups = [{
+                key: 'frame',
+                label: `Masked Frame ${card.annotations.length}/${totalFrameCount || 0}`,
+                onStep: stepViewportFrame,
+                prevTitle: 'Previous frame',
+                nextTitle: 'Next frame',
+              }];
+            } else {
+              const slicesAtCurrentTime = new Set<number>();
+              const annotatedTimes = new Set<number>();
+              for (const { referencedImageId } of card.annotations) {
+                const fi = referencedImageId ? (imageIdIndexMap.get(referencedImageId) ?? -1) : -1;
+                if (fi < 0) continue;
+                const t = framesPerTimePoint > 1 ? Math.floor(fi / framesPerTimePoint) : fi;
+                const s = framesPerTimePoint > 1 ? fi % framesPerTimePoint : 0;
+                annotatedTimes.add(t);
+                if (t === currentTimeIndex) slicesAtCurrentTime.add(s);
+              }
+              navigationGroups = [
+                {
+                  key: 'slices',
+                  label: `Annotated Slice ${slicesAtCurrentTime.size}/${framesPerTimePoint}`,
+                  onStep: stepViewportFrame,
+                  prevTitle: 'Previous slice',
+                  nextTitle: 'Next slice',
+                },
+                ...(totalTimePoints > 1 ? [{
+                  key: 'time',
+                  label: `Annotated Frame ${annotatedTimes.size}/${totalTimePoints}`,
+                  onStep: stepViewportTime,
+                  prevTitle: 'Previous frame',
+                  nextTitle: 'Next frame',
+                }] : []),
+              ];
+            }
+
             return (
-              <SegmentCard
+              <div
                 key={card.id}
-                label={card.name}
-                colorHex={card.color}
-                visible={card.visible}
-                active={isActive}
-                opacity={card.opacity}
-                frameInfo={frameText}
-                onStepFrame={stepViewportFrame}
-                onSelect={
-                  card.isMask
-                    ? () => {
-                        setActiveLabelId(card.id);
-                        window?.dispatchEvent?.(
-                          new CustomEvent(OVI_ACTIVE_LABEL_EVENT, {
-                            detail: { labelId: card.id, sourceToolName: 'MaskContour' },
-                          })
-                        );
-                      }
-                    : () => void handleLabelSelect(card.id)
-                }
-                onToggleVisibility={
-                  isInteractive
-                    ? () => {
-                        if (card.isMask) {
-                          handleMaskVisibilityChange(!card.visible);
-                        } else {
-                          handleVisibilityChange(card.id, !card.visible);
+                data-testid={`ovi-segmentation-row-${card.id}`}
+                data-cy={`ovi-segmentation-row-${card.id}`}
+              >
+                <SegmentCard
+                  label={card.name}
+                  colorHex={card.color}
+                  visible={card.visible}
+                  active={isActive}
+                  opacity={card.opacity}
+                  navigationGroups={navigationGroups}
+                  onSelect={
+                    card.isMask
+                      ? () => {
+                          setActiveLabelId(card.id);
+                          window?.dispatchEvent?.(
+                            new CustomEvent(OVI_ACTIVE_LABEL_EVENT, {
+                              detail: { labelId: card.id, sourceToolName: 'MaskContour' },
+                            })
+                          );
                         }
-                      }
-                    : undefined
-                }
-                visibilityDisabled={!isInteractive}
-                onOpacityChange={value => {
-                  if (card.isMask) {
-                    handleMaskOpacityChange(value);
-                  } else {
-                    setCardOpacity(card.id, value);
+                      : () => void handleLabelSelect(card.id)
                   }
-                }}
-                moreMenuContent={
-                  !card.isMask && isInteractive ? (
-                    <>
-                      <DropdownMenuItem
-                        disabled={!canDeleteCurrentFrame}
-                        onClick={e => {
-                          e.stopPropagation();
-                          handleDeleteCurrentFrame(card.id);
-                        }}
-                      >
-                        <span>Delete Current Frame</span>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={e => {
-                          e.stopPropagation();
-                          handleDeleteAllFrames(card.id);
-                        }}
-                      >
-                        <span>Delete All Frames ({annotatedFrames})</span>
-                      </DropdownMenuItem>
-                    </>
-                  ) : null
-                }
-              />
+                  onToggleVisibility={
+                    isInteractive
+                      ? () => {
+                          if (card.isMask) {
+                            handleMaskVisibilityChange(!card.visible);
+                          } else {
+                            handleVisibilityChange(card.id, !card.visible);
+                          }
+                        }
+                      : undefined
+                  }
+                  visibilityDisabled={!isInteractive}
+                  onOpacityChange={value => {
+                    if (card.isMask) {
+                      handleMaskOpacityChange(value);
+                    } else {
+                      setCardOpacity(card.id, value);
+                    }
+                  }}
+                  moreMenuContent={
+                    !card.isMask && isInteractive ? (
+                      <>
+                        <DropdownMenuItem
+                          disabled={!canDeleteCurrentFrame}
+                          onClick={e => {
+                            e.stopPropagation();
+                            handleDeleteCurrentFrame(card.id);
+                          }}
+                        >
+                          <span>Delete Current Frame</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={e => {
+                            e.stopPropagation();
+                            handleDeleteAllFrames(card.id);
+                          }}
+                        >
+                          <span>Delete All Frames ({annotatedFrames})</span>
+                        </DropdownMenuItem>
+                      </>
+                    ) : null
+                  }
+                />
+              </div>
             );
           })}
         </div>
